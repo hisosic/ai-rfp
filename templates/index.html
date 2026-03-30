@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script>
+        // Ensure base href always ends with / for relative path resolution
+        (function(){
+            var p = location.pathname;
+            if (!p.endsWith('/')) { location.replace(p + '/' + location.search + location.hash); }
+        })();
+    </script>
+    <base href="./">
+    <title>RFP AI Analyzer - AI 제안 업무 자동화 플랫폼</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<!-- Username Modal -->
+<div id="usernameModal" class="modal-overlay show" style="z-index:999">
+    <div class="modal" style="max-width:400px;text-align:center">
+        <div class="modal-title" style="margin-bottom:8px">사용자 이름 입력</div>
+        <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px">실시간 협업을 위해 이름을 입력해주세요</p>
+        <input class="form-control" id="usernameInput" placeholder="예: 홍길동" style="text-align:center;font-size:16px;margin-bottom:16px"
+               onkeydown="if(event.key==='Enter')confirmUsername()">
+        <button class="btn btn-primary btn-lg" style="width:100%" onclick="confirmUsername()">입장</button>
+    </div>
+</div>
+
+<!-- Export Modal -->
+<div id="exportModal" class="modal-overlay" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+            <div class="modal-title">Export / AI Score</div>
+            <div class="btn-group">
+                <button class="btn btn-outline" onclick="copyExport()">Copy</button>
+                <button class="btn btn-outline" onclick="downloadExport()">Download .md</button>
+                <button class="btn btn-outline" onclick="closeModal()">&times; Close</button>
+            </div>
+        </div>
+        <pre id="exportContent"></pre>
+    </div>
+</div>
+
+<!-- Sidebar -->
+<nav class="sidebar">
+    <div class="sidebar-header">
+        <div class="sidebar-logo">
+            <div class="logo-icon">R</div>
+            RFP AI
+        </div>
+        <div class="sidebar-sub">AI 제안 업무 자동화 플랫폼</div>
+    </div>
+
+    <div class="sidebar-nav">
+        <div class="nav-section">개요</div>
+        <button class="nav-item active" data-tab="tab-dashboard">
+            <span class="nav-icon">&#9632;</span>
+            <span class="nav-text">대시보드</span>
+        </button>
+
+        <div class="nav-section">분석</div>
+        <button class="nav-item" data-tab="tab-upload">
+            <span class="nav-icon">&#8679;</span>
+            <span class="nav-text">RFP 업로드</span>
+        </button>
+        <button class="nav-item" data-tab="tab-analyze">
+            <span class="nav-icon">&#9906;</span>
+            <span class="nav-text">요구사항 구조화</span>
+        </button>
+        <button class="nav-item" data-tab="tab-pattern">
+            <span class="nav-icon">&#9733;</span>
+            <span class="nav-text">수주 패턴 분석</span>
+        </button>
+
+        <div class="nav-section">생성</div>
+        <button class="nav-item" data-tab="tab-proposal">
+            <span class="nav-icon">&#9998;</span>
+            <span class="nav-text">제안서 초안</span>
+        </button>
+        <button class="nav-item" data-tab="tab-review">
+            <span class="nav-icon">&#9878;</span>
+            <span class="nav-text">리뷰 AI</span>
+        </button>
+
+        <div class="nav-section">전략</div>
+        <button class="nav-item" data-tab="tab-strategy">
+            <span class="nav-icon">&#9650;</span>
+            <span class="nav-text">Go / No-Go</span>
+        </button>
+        <button class="nav-item" data-tab="tab-estimate">
+            <span class="nav-icon">&#128176;</span>
+            <span class="nav-text">사업 견적</span>
+        </button>
+
+        <div class="nav-section">자산</div>
+        <button class="nav-item" data-tab="tab-knowledge">
+            <span class="nav-icon">&#9881;</span>
+            <span class="nav-text">지식 자산</span>
+        </button>
+
+        <div class="nav-section">관리</div>
+        <button class="nav-item" data-tab="tab-history">
+            <span class="nav-icon">&#128197;</span>
+            <span class="nav-text">분석 이력</span>
+        </button>
+        <button class="nav-item" data-tab="tab-version">
+            <span class="nav-icon">&#128196;</span>
+            <span class="nav-text">버전 관리</span>
+        </button>
+        <button class="nav-item" data-tab="tab-team">
+            <span class="nav-icon">&#128101;</span>
+            <span class="nav-text">팀 협업</span>
+        </button>
+        <button class="nav-item" data-tab="tab-schedule">
+            <span class="nav-icon">&#128197;</span>
+            <span class="nav-text">자동 일정</span>
+        </button>
+
+        <div class="nav-section">자동화</div>
+        <button class="nav-item" data-tab="tab-pipeline">
+            <span class="nav-icon">&#9654;</span>
+            <span class="nav-text">원클릭 파이프라인</span>
+        </button>
+    </div>
+
+    <div class="sidebar-footer">
+        <div class="api-status">
+            <span class="api-dot on" id="apiDot"></span>
+            <span>Claude Sonnet 4</span>
+        </div>
+    </div>
+</nav>
+
+<!-- Main -->
+<div class="main">
+    <div class="topbar">
+        <button class="mobile-menu-btn" onclick="toggleSidebar()">&#9776;</button>
+        <div class="topbar-title">Dashboard</div>
+        <div class="topbar-right">
+            <div id="onlineUsers" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)">
+                <span style="width:8px;height:8px;border-radius:50%;background:var(--success);animation:pulse 2s infinite"></span>
+                <span id="onlineCount">1</span>명 접속중
+            </div>
+            <span class="topbar-badge">PARAIX Hackathon 2026</span>
+        </div>
+    </div>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+
+    <div class="content">
+
+        <!-- ════ Dashboard ════ -->
+        <div id="tab-dashboard" class="tab-content active">
+            <div class="stats-grid">
+                <div class="stat-card purple">
+                    <div class="stat-label">RFP 문서</div>
+                    <div class="stat-value" id="statRfp">0</div>
+                    <div class="stat-sub">업로드된 RFP</div>
+                </div>
+                <div class="stat-card cyan">
+                    <div class="stat-label">생성 제안서</div>
+                    <div class="stat-value" id="statProposal">0</div>
+                    <div class="stat-sub">AI 자동 생성</div>
+                </div>
+                <div class="stat-card green">
+                    <div class="stat-label">지식 자산</div>
+                    <div class="stat-value" id="statKnowledge">0</div>
+                    <div class="stat-sub">재사용 가능 콘텐츠</div>
+                </div>
+                <div class="stat-card amber">
+                    <div class="stat-label">파이프라인</div>
+                    <div class="stat-value" id="statPipeline">0</div>
+                    <div class="stat-sub">전체 분석 완료</div>
+                </div>
+            </div>
+
+            <!-- Pipeline Visual -->
+            <div class="card">
+                <div class="card-title">AI 분석 파이프라인</div>
+                <div class="pipeline-visual">
+                    <div class="pipe-step" id="pipe-analyze">
+                        <div class="pipe-circle">&#9906;</div>
+                        <div class="pipe-label">구조화</div>
+                    </div>
+                    <div class="pipe-connector" id="conn-0"></div>
+                    <div class="pipe-step" id="pipe-pattern">
+                        <div class="pipe-circle">&#9733;</div>
+                        <div class="pipe-label">패턴분석</div>
+                    </div>
+                    <div class="pipe-connector" id="conn-1"></div>
+                    <div class="pipe-step" id="pipe-proposal">
+                        <div class="pipe-circle">&#9998;</div>
+                        <div class="pipe-label">초안생성</div>
+                    </div>
+                    <div class="pipe-connector" id="conn-2"></div>
+                    <div class="pipe-step" id="pipe-review">
+                        <div class="pipe-circle">&#9878;</div>
+                        <div class="pipe-label">레드팀</div>
+                    </div>
+                    <div class="pipe-connector" id="conn-3"></div>
+                    <div class="pipe-step" id="pipe-strategy">
+                        <div class="pipe-circle">&#9650;</div>
+                        <div class="pipe-label">Go/No-Go</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RFP Management -->
+            <div class="card">
+                <div class="card-title" style="justify-content:space-between">
+                    <span>RFP 관리</span>
+                    <button class="btn btn-primary" style="font-size:12px;padding:5px 14px" onclick="switchTab('tab-upload')">+ 새 RFP</button>
+                </div>
+                <div id="rfpManageList"></div>
+            </div>
+
+            <!-- Activity -->
+            <div class="card">
+                <div class="card-title">Activity Log</div>
+                <div id="activityLog"></div>
+            </div>
+        </div>
+
+        <!-- ════ Upload ════ -->
+        <div id="tab-upload" class="tab-content">
+            <div class="card">
+                <div class="card-title">RFP 문서 업로드</div>
+                <p style="color:var(--text-muted);margin-bottom:20px">PDF 형식의 RFP를 업로드하면 AI가 자동으로 텍스트를 추출합니다.</p>
+                <div id="uploadArea" class="upload-area">
+                    <div class="upload-icon">&#128451;</div>
+                    <p><strong style="color:var(--text)">탭하여 PDF 파일을 선택하세요</strong></p>
+                    <p>PDF 파일 지원 (최대 50MB)</p>
+                    <p class="upload-filename"></p>
+                </div>
+                <input type="file" id="fileInput" accept=".pdf,application/pdf" style="display:none">
+                <button class="btn btn-primary btn-lg" style="width:100%;margin-top:12px" onclick="document.getElementById('fileInput').click()">PDF 파일 선택</button>
+                <div id="uploadSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">PDF 업로드 및 텍스트 추출 중...</div></div>
+                <div id="uploadResult" class="result-area">
+                    <div class="section-title">업로드 결과</div>
+                    <div id="uploadInfo" style="margin-bottom:12px;font-size:14px;color:var(--text-dim)"></div>
+                    <pre id="uploadPreview" style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:16px;max-height:300px;overflow-y:auto;font-size:13px;white-space:pre-wrap;color:var(--text-dim)"></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- ════ Analyze ════ -->
+        <div id="tab-analyze" class="tab-content">
+            <div class="card">
+                <div class="card-title">RFP 자동 구조화 분석</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">AI가 RFP에서 요구사항, 평가 기준, 리스크를 자동 추출합니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="analyzeRfpSelect"></select></div>
+                <div class="btn-group" style="margin-bottom:12px">
+                    <button class="btn btn-primary" id="btnAnalyze" onclick="analyzeRfp()">구조화 분석 시작</button>
+                </div>
+                <div id="historyBar-analyze" class="history-bar"></div>
+                <div id="analyzeSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">AI가 RFP를 분석 중...</div></div>
+                <div id="analyzeResult" class="result-area"></div>
+            </div>
+        </div>
+
+        <!-- ════ Pattern ════ -->
+        <div id="tab-pattern" class="tab-content">
+            <div class="card">
+                <div class="card-title">Winning Proposal 패턴 분석</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">고객/산업별 수주 성공 패턴과 차별화 전략을 추천합니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="patternRfpSelect"></select></div>
+                <div class="grid-2">
+                    <div class="form-group"><label>산업 분야</label>
+                        <select class="form-control" id="patternIndustry">
+                            <option>IT/소프트웨어</option><option>금융</option><option>제조</option><option>공공</option><option>의료/헬스케어</option><option>유통/물류</option><option>건설/엔지니어링</option><option>블록체인/Web3</option>
+                        </select></div>
+                    <div class="form-group"><label>고객 유형</label>
+                        <select class="form-control" id="patternCustomer">
+                            <option>대기업</option><option>공공기관</option><option>중견기업</option><option>스타트업</option><option>외국계</option>
+                        </select></div>
+                </div>
+                <div class="btn-group" style="margin-bottom:12px">
+                    <button class="btn btn-primary" id="btnPattern" onclick="analyzePattern()">패턴 분석</button>
+                </div>
+                <div id="historyBar-pattern" class="history-bar"></div>
+                <div id="patternSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">패턴 분석 중...</div></div>
+                <div id="patternResult" class="result-area"></div>
+            </div>
+        </div>
+
+        <!-- ════ Proposal ════ -->
+        <div id="tab-proposal" class="tab-content">
+            <div class="card">
+                <div class="card-title">제안서 자동 초안 생성</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">RFP + 회사정보 + 레퍼런스를 결합하여 맞춤형 제안서를 생성합니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="proposalRfpSelect"></select></div>
+                <div class="form-group"><label>회사 정보 (강점, 역량, 수행실적)</label>
+                    <textarea class="form-control" id="companyInfo" placeholder="예: 블록체인 전문 기업, 파라메타 — DID/VC 플랫폼 개발, 금융권 SI 경험 다수"></textarea></div>
+                <div class="form-group"><label>레퍼런스 / 참고 자료</label>
+                    <textarea class="form-control" id="references" placeholder="예: A은행 DID 인증 시스템 (2024), B사 블록체인 SCM (2023)"></textarea></div>
+                <div class="btn-group" style="margin-bottom:12px">
+                    <button class="btn btn-success" id="btnProposal" onclick="generateProposal()">초안 생성</button>
+                </div>
+                <div id="historyBar-proposal" class="history-bar"></div>
+                <div id="proposalSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">제안서 초안 생성 중...</div></div>
+                <div id="proposalResult" class="result-area"></div>
+            </div>
+        </div>
+
+        <!-- ════ Review ════ -->
+        <div id="tab-review" class="tab-content">
+            <div class="card">
+                <div class="card-title">Review AI (Red Team)</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">제안서를 비판적으로 검토하여 누락, 논리 불일치, 약점을 찾습니다.</p>
+                <div class="rfp-selector"><label>RFP (원문 대조):</label><select class="form-control rfp-select" id="reviewRfpSelect"></select></div>
+                <div class="form-group"><label>검토할 제안서 내용</label>
+                    <textarea class="form-control" id="proposalTextForReview" style="min-height:200px" placeholder="제안서 전문 또는 주요 섹션을 붙여넣으세요..."></textarea></div>
+                <div class="btn-group" style="margin-bottom:12px">
+                    <button class="btn btn-warning" id="btnReview" onclick="reviewProposal()">Red Team 리뷰</button>
+                </div>
+                <div id="historyBar-review" class="history-bar"></div>
+                <div id="reviewSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">레드팀 리뷰 중...</div></div>
+                <div id="reviewResult" class="result-area"></div>
+            </div>
+        </div>
+
+        <!-- ════ Strategy ════ -->
+        <div id="tab-strategy" class="tab-content">
+            <div class="card">
+                <div class="card-title">Go / No-Go 전략 추천</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">RFP 대응 여부와 수주 전략을 AI가 분석합니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="strategyRfpSelect"></select></div>
+                <div class="form-group"><label>회사 강점 / 보유 역량</label>
+                    <textarea class="form-control" id="companyStrengths" placeholder="예: AI/ML 전문 인력 30명, 블록체인 DID 특허 보유"></textarea></div>
+                <div class="form-group"><label>시장 상황 / 경쟁 환경</label>
+                    <textarea class="form-control" id="marketContext" placeholder="예: 주요 경쟁사 A, B / 해당 고객과 기존 거래 관계"></textarea></div>
+                <div class="btn-group" style="margin-bottom:12px">
+                    <button class="btn btn-primary" id="btnStrategy" onclick="analyzeStrategy()">Go/No-Go 분석</button>
+                </div>
+                <div id="historyBar-strategy" class="history-bar"></div>
+                <div id="strategySpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">전략 분석 중...</div></div>
+                <div id="strategyResult" class="result-area"></div>
+            </div>
+        </div>
+
+        <!-- ════ Estimate ════ -->
+        <div id="tab-estimate" class="tab-content">
+            <div class="card">
+                <div class="card-title">AI 사업 견적 산출</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">RFP를 분석하여 인건비, SW, HW, 기타 경비를 항목별 상세 사유와 함께 산출합니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="estimateRfpSelect"></select></div>
+                <div class="form-group"><label>추가 정보 (선택)</label>
+                    <textarea class="form-control" id="estimateInfo" placeholder="예: 인력 10명 이내, 예산 한도 5억, 클라우드 AWS 기반 등"></textarea></div>
+                <div class="btn-group" style="margin-bottom:12px">
+                    <button class="btn btn-primary" id="btnEstimate" onclick="runEstimate()">견적 산출</button>
+                </div>
+                <div id="historyBar-estimate" class="history-bar"></div>
+                <div id="estimateSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">AI가 견적을 산출 중...</div></div>
+                <div id="estimateResult" class="result-area"></div>
+            </div>
+        </div>
+
+        <!-- ════ Knowledge ════ -->
+        <div id="tab-knowledge" class="tab-content">
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-title">Knowledge 등록</div>
+                    <div class="form-group"><label>카테고리</label>
+                        <select class="form-control" id="knowledgeCategory">
+                            <option>제안 문장 라이브러리</option><option>산업별 템플릿</option><option>성공 사례</option><option>기술 솔루션</option><option>레퍼런스</option>
+                        </select></div>
+                    <div class="form-group"><label>제목</label><input class="form-control" id="knowledgeTitle" placeholder="예: 블록체인 DID 인증 핵심 문장"></div>
+                    <div class="form-group"><label>내용</label><textarea class="form-control" id="knowledgeContent" placeholder="재사용 가능한 문장, 템플릿, 사례..."></textarea></div>
+                    <div class="form-group"><label>태그 (쉼표 구분)</label><input class="form-control" id="knowledgeTags" placeholder="블록체인, DID, 공공"></div>
+                    <button class="btn btn-success" onclick="saveKnowledge()">저장</button>
+                </div>
+                <div class="card">
+                    <div class="card-title">Knowledge Base</div>
+                    <div id="knowledgeList"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ════ Pipeline ════ -->
+        <div id="tab-pipeline" class="tab-content">
+            <div class="card">
+                <div class="card-title" style="font-size:20px">One-Click AI Pipeline</div>
+                <p style="color:var(--text-muted);margin-bottom:20px">
+                    RFP 업로드 한 번으로 <strong style="color:var(--primary-light)">구조화 → 패턴분석 → 초안생성 → 리뷰 → Go/No-Go</strong> 5단계를 자동 실행합니다.
+                </p>
+
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="pipelineRfpSelect"></select></div>
+
+                <div class="grid-3" style="margin-bottom:20px">
+                    <div class="form-group"><label>회사 정보</label>
+                        <input class="form-control" id="pipelineCompany" placeholder="회사 강점/역량"></div>
+                    <div class="form-group"><label>산업</label>
+                        <select class="form-control" id="pipelineIndustry">
+                            <option>IT/소프트웨어</option><option>금융</option><option>공공</option><option>블록체인/Web3</option>
+                        </select></div>
+                    <div class="form-group"><label>고객 유형</label>
+                        <select class="form-control" id="pipelineCustomer">
+                            <option>대기업</option><option>공공기관</option><option>중견기업</option>
+                        </select></div>
+                </div>
+
+                <button class="btn btn-primary btn-lg" id="pipelineBtn" onclick="runPipeline()" style="width:100%">
+                    One-Click 파이프라인 실행
+                </button>
+
+                <div id="pipelineSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">5단계 AI 파이프라인 실행 중... (약 30초~1분 소요)</div></div>
+                <div id="pipelineResult" class="result-area"></div>
+            </div>
+        </div>
+
+        <!-- ════ Analysis History ════ -->
+        <div id="tab-history" class="tab-content">
+            <div class="card">
+                <div class="card-title">분석 이력 관리</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">각 분석(구조화, 패턴, 초안, 리뷰, Go/No-Go)의 모든 실행 기록을 날짜+버전으로 열람합니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="historyRfpSelect" onchange="loadHistory()"></select></div>
+                <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+                    <button class="btn btn-primary" onclick="loadHistory('')" style="font-size:13px">전체</button>
+                    <button class="btn btn-outline" onclick="loadHistory('analyze')" style="font-size:13px">구조화</button>
+                    <button class="btn btn-outline" onclick="loadHistory('pattern')" style="font-size:13px">패턴</button>
+                    <button class="btn btn-outline" onclick="loadHistory('proposal')" style="font-size:13px">제안서</button>
+                    <button class="btn btn-outline" onclick="loadHistory('review')" style="font-size:13px">리뷰</button>
+                    <button class="btn btn-outline" onclick="loadHistory('strategy')" style="font-size:13px">Go/No-Go</button>
+                </div>
+                <div id="historyList"></div>
+            </div>
+        </div>
+
+        <!-- ════ Version Control ════ -->
+        <div id="tab-version" class="tab-content">
+            <div class="card">
+                <div class="card-title">제안서 버전 관리</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">제안서 수정 이력을 추적하고, 버전별 점수 변화를 확인합니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="versionRfpSelect"></select></div>
+                <div class="grid-2">
+                    <div class="form-group"><label>점수 (0~100)</label><input type="number" class="form-control" id="versionScore" min="0" max="100" value="0"></div>
+                    <div class="form-group"><label>변경 메모</label><input class="form-control" id="versionNote" placeholder="예: 차별화 섹션 보강"></div>
+                </div>
+                <div class="form-group"><label>제안서 내용</label>
+                    <textarea class="form-control" id="versionContent" style="min-height:120px" placeholder="제안서 전문 또는 주요 변경 내용을 붙여넣으세요"></textarea></div>
+                <button class="btn btn-primary" onclick="saveVersion()">버전 저장</button>
+            </div>
+            <div class="card">
+                <div class="card-title">버전 이력</div>
+                <div id="versionScoreChart" style="display:flex;align-items:flex-end;gap:4px;height:80px;margin-bottom:16px;padding:8px 0"></div>
+                <div id="versionList"></div>
+            </div>
+        </div>
+
+        <!-- ════ Team Collab ════ -->
+        <div id="tab-team" class="tab-content">
+            <div class="card">
+                <div class="card-title">AI 자동 업무 배정</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">RFP를 분석하여 제안서 섹션별 담당자를 AI가 자동 배정합니다. 배정 후 담당자를 수정할 수 있습니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="teamRfpSelect" onchange="loadTeam()"></select></div>
+
+                <div class="card" style="background:var(--bg-card2);margin-bottom:16px">
+                    <div class="card-title" style="font-size:15px">팀원 등록</div>
+                    <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+                        <input class="form-control" id="memberName" placeholder="이름" style="flex:1;min-width:120px">
+                        <input class="form-control" id="memberRole" placeholder="역할 (PM, 기술리드, 아키텍트, 기획자...)" style="flex:1;min-width:150px">
+                        <button class="btn btn-primary" onclick="addMember()">추가</button>
+                    </div>
+                    <div id="memberList"></div>
+                </div>
+
+                <div class="btn-group" style="margin-bottom:20px">
+                    <button class="btn btn-success btn-lg" id="btnAutoAssign" onclick="autoAssign()">AI 자동 업무 배정</button>
+                    <button class="btn btn-outline" onclick="addSectionManual()">수동 섹션 추가</button>
+                </div>
+                <div id="autoAssignSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">RFP 분석하여 업무 배정 중...</div></div>
+                <div id="sectionList"></div>
+            </div>
+        </div>
+
+        <!-- ════ Auto Schedule ════ -->
+        <div id="tab-schedule" class="tab-content">
+            <div class="card">
+                <div class="card-title">자동 일정 생성</div>
+                <p style="color:var(--text-muted);margin-bottom:16px">제안서 마감일을 입력하면 AI가 역산하여 단계별 일정을 자동 생성합니다.</p>
+                <div class="rfp-selector"><label>RFP:</label><select class="form-control rfp-select" id="scheduleRfpSelect"></select></div>
+                <div class="form-group"><label>제안서 마감일</label>
+                    <input type="date" class="form-control" id="scheduleDeadline"></div>
+                <button class="btn btn-primary" id="btnSchedule" onclick="generateSchedule()">일정 생성</button>
+                <div id="scheduleResult" class="result-area"></div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<script src="static/js/app.js"></script>
+</body>
+</html>

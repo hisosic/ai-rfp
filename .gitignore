@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv/
+uploads/*
+!uploads/.gitkeep
+data/*
+!data/.gitkeep
+.env
+*.pdf
+.DS_Store
+.claude/settings.local.json
