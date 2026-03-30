@@ -1,3 +1,6 @@
+<img width="1455" height="1001" alt="image" src="https://github.com/user-attachments/assets/1b52491a-8704-42f7-a2f9-4ad80d8cc9fa" />
+
+
 # RFP AI Analyzer
 
 AI 기반 제안서(RFP) 분석 및 제안 업무 자동화 플랫폼
