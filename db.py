@@ -4,6 +4,8 @@ Replaces JSON file-based persistence with a dedicated database.
 """
 import os
 import json
+import hashlib
+import secrets
 from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
@@ -14,13 +16,24 @@ import psycopg2.extras
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://rfp:changeme@localhost:5432/rfpdb")
 
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    username      TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    is_admin      BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS rfps (
     id          TEXT PRIMARY KEY,
     filename    TEXT NOT NULL,
     filepath    TEXT NOT NULL,
     text_length INTEGER NOT NULL DEFAULT 0,
-    uploaded_at TEXT NOT NULL
+    uploaded_at TEXT NOT NULL,
+    owner_id    INTEGER
 );
+
+ALTER TABLE rfps ADD COLUMN IF NOT EXISTS owner_id INTEGER;
 
 CREATE TABLE IF NOT EXISTS proposals (
     id       TEXT PRIMARY KEY,
@@ -93,6 +106,13 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     action TEXT NOT NULL,
     detail TEXT DEFAULT ''
 );
+
+CREATE INDEX IF NOT EXISTS idx_rfps_owner ON rfps(owner_id);
+CREATE INDEX IF NOT EXISTS idx_proposals_rfp ON proposals(rfp_id);
+CREATE INDEX IF NOT EXISTS idx_versions_rfp ON versions(rfp_id);
+CREATE INDEX IF NOT EXISTS idx_team_sections_rfp ON team_sections(rfp_id);
+CREATE INDEX IF NOT EXISTS idx_team_members_rfp ON team_members(rfp_id);
+CREATE INDEX IF NOT EXISTS idx_history_rfp_step ON analysis_history(rfp_id, step);
 """
 
 
@@ -119,7 +139,91 @@ def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(SCHEMA_SQL)
+    ensure_admin_user()
     migrate_from_json_if_needed()
+
+
+# ─── Auth / Users ───
+
+def _hash_password(password: str, salt: str = None) -> str:
+    if salt is None:
+        salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000)
+    return f"{salt}${h.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        salt, _ = stored.split("$", 1)
+    except ValueError:
+        return False
+    return secrets.compare_digest(_hash_password(password, salt), stored)
+
+
+def ensure_admin_user():
+    username = os.environ.get("ADMIN_USERNAME", "admin")
+    password = os.environ.get("ADMIN_PASSWORD", "admin1234")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username=%s", (username,))
+        if cur.fetchone():
+            return
+        cur.execute(
+            "INSERT INTO users (username,password_hash,is_admin,created_at) VALUES (%s,%s,TRUE,%s)",
+            (username, _hash_password(password), datetime.now().isoformat()),
+        )
+        print(f"[Auth] Created default admin user: {username}")
+
+
+def create_user(username: str, password: str, is_admin: bool = False):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO users (username,password_hash,is_admin,created_at) VALUES (%s,%s,%s,%s) RETURNING id",
+            (username, _hash_password(password), is_admin, datetime.now().isoformat()),
+        )
+        return cur.fetchone()[0]
+
+
+def get_user_by_username(username: str):
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM users WHERE username=%s", (username,))
+        return cur.fetchone()
+
+
+def get_user_by_id(user_id: int):
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT id,username,is_admin,created_at FROM users WHERE id=%s", (user_id,))
+        return cur.fetchone()
+
+
+def verify_user(username: str, password: str):
+    user = get_user_by_username(username)
+    if not user:
+        return None
+    if not _verify_password(password, user["password_hash"]):
+        return None
+    return {"id": user["id"], "username": user["username"], "is_admin": user["is_admin"]}
+
+
+def list_users():
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""SELECT u.id, u.username, u.is_admin, u.created_at,
+                       (SELECT COUNT(*) FROM rfps WHERE owner_id=u.id) AS rfp_count
+                       FROM users u ORDER BY u.id""")
+        return cur.fetchall()
+
+
+def delete_user(user_id: int):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        # Release owned RFPs so admin can still see them; leave content intact
+        cur.execute("UPDATE rfps SET owner_id=NULL WHERE owner_id=%s", (user_id,))
+        cur.execute("DELETE FROM users WHERE id=%s AND is_admin=FALSE", (user_id,))
+        return cur.rowcount > 0
 
 
 def migrate_from_json_if_needed():
@@ -183,11 +287,11 @@ def migrate_from_json_if_needed():
 
 # ─── RFP CRUD ───
 
-def insert_rfp(rfp_id, filename, filepath, text_length, uploaded_at):
+def insert_rfp(rfp_id, filename, filepath, text_length, uploaded_at, owner_id=None):
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("INSERT INTO rfps (id,filename,filepath,text_length,uploaded_at) VALUES (%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET filename=%s,filepath=%s,text_length=%s,uploaded_at=%s",
-                    (rfp_id, filename, filepath, text_length, uploaded_at, filename, filepath, text_length, uploaded_at))
+        cur.execute("INSERT INTO rfps (id,filename,filepath,text_length,uploaded_at,owner_id) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET filename=%s,filepath=%s,text_length=%s,uploaded_at=%s",
+                    (rfp_id, filename, filepath, text_length, uploaded_at, owner_id, filename, filepath, text_length, uploaded_at))
 
 def get_rfp_meta(rfp_id):
     with get_conn() as conn:
@@ -201,17 +305,30 @@ def rfp_exists(rfp_id):
         cur.execute("SELECT 1 FROM rfps WHERE id=%s", (rfp_id,))
         return cur.fetchone() is not None
 
-def list_rfps():
+def list_rfps(owner_id=None):
     with get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM rfps ORDER BY uploaded_at DESC")
+        if owner_id is None:
+            cur.execute("SELECT * FROM rfps ORDER BY uploaded_at DESC")
+        else:
+            cur.execute("SELECT * FROM rfps WHERE owner_id=%s ORDER BY uploaded_at DESC", (owner_id,))
         return cur.fetchall()
 
-def count_rfps():
+def count_rfps(owner_id=None):
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM rfps")
+        if owner_id is None:
+            cur.execute("SELECT COUNT(*) FROM rfps")
+        else:
+            cur.execute("SELECT COUNT(*) FROM rfps WHERE owner_id=%s", (owner_id,))
         return cur.fetchone()[0]
+
+def rfp_owner(rfp_id):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT owner_id FROM rfps WHERE id=%s", (rfp_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 def delete_rfp(rfp_id):
     with get_conn() as conn:

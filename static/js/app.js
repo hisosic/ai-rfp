@@ -4,17 +4,107 @@ let rfpList = [];
 let cachedResults = {};
 let activeControllers = {};
 let currentUsername = '';
+let currentUser = null;
+let authMode = 'login';
 let ws = null;
 
-// ─── Username & WebSocket ───
-function confirmUsername() {
-    const input = el('usernameInput');
-    const name = input.value.trim();
-    if (!name) { input.focus(); return; }
-    currentUsername = name;
-    localStorage.setItem('rfp_username', name);
-    el('usernameModal').classList.remove('show');
-    connectWebSocket(name);
+// ─── Auth ───
+function toggleAuthMode() {
+    authMode = authMode === 'login' ? 'register' : 'login';
+    const isLogin = authMode === 'login';
+    el('authTitle').textContent = isLogin ? '로그인' : '회원가입';
+    el('authSubtitle').textContent = isLogin ? '계정으로 로그인하세요' : '새 계정을 만들어주세요';
+    el('authSubmitBtn').textContent = isLogin ? '로그인' : '가입하기';
+    el('authToggleText').textContent = isLogin ? '계정이 없으신가요?' : '이미 계정이 있으신가요?';
+    el('authToggleBtn').textContent = isLogin ? '회원가입' : '로그인';
+}
+
+async function submitAuth() {
+    const username = el('authUsername').value.trim();
+    const password = el('authPassword').value;
+    if (!username || !password) return showToast('아이디와 비밀번호를 입력하세요', 'warning');
+    const fd = new FormData();
+    fd.append('username', username);
+    fd.append('password', password);
+    try {
+        const r = await fetch(`api/auth/${authMode}`, { method: 'POST', body: fd, credentials: 'same-origin' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || '인증 실패');
+        onAuthed(data.user);
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+function onAuthed(user) {
+    currentUser = user;
+    currentUsername = user.username;
+    el('authModal').classList.remove('show');
+    const sb = el('mainSidebar'); if (sb) sb.style.display = '';
+    const mc = el('mainContent'); if (mc) mc.style.display = '';
+    el('userMenu').style.display = 'flex';
+    el('userDisplayName').textContent = user.username + (user.is_admin ? ' (관리자)' : '');
+    el('adminBtn').style.display = user.is_admin ? '' : 'none';
+    connectWebSocket(user.username);
+    refreshDashboard();
+    if (typeof loadKnowledge === 'function') loadKnowledge();
+    if (typeof refreshRfpList === 'function') refreshRfpList();
+}
+
+async function logout() {
+    try { ws && ws.close(1000); } catch {}
+    ws = null;
+    await fetch('api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+    location.reload();
+}
+
+async function openAdminModal() {
+    el('adminModal').classList.add('show');
+    const list = el('adminUsersList');
+    list.innerHTML = '로딩 중...';
+    try {
+        const r = await fetch('api/admin/users', { credentials: 'same-origin' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || '조회 실패');
+        const rows = data.users.map(u => `
+            <tr>
+                <td>${u.id}</td>
+                <td>${u.username}${u.is_admin ? ' <span class="badge">ADMIN</span>' : ''}</td>
+                <td>${u.rfp_count}</td>
+                <td>${(u.created_at || '').slice(0,10)}</td>
+                <td>${u.is_admin ? '-' : `<button class="btn btn-outline btn-sm" onclick="deleteUser(${u.id},'${u.username}')">삭제</button>`}</td>
+            </tr>
+        `).join('');
+        list.innerHTML = `
+            <table style="width:100%;border-collapse:collapse">
+                <thead><tr style="background:var(--bg-muted)">
+                    <th style="padding:8px;text-align:left">ID</th>
+                    <th style="padding:8px;text-align:left">아이디</th>
+                    <th style="padding:8px;text-align:left">RFP 수</th>
+                    <th style="padding:8px;text-align:left">가입일</th>
+                    <th style="padding:8px;text-align:left">작업</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+    } catch (e) {
+        list.innerHTML = `<div style="color:red">${e.message}</div>`;
+    }
+}
+
+function closeAdminModal() { el('adminModal').classList.remove('show'); }
+
+async function deleteUser(userId, username) {
+    if (!confirm(`사용자 "${username}"을(를) 삭제하시겠습니까?\n해당 사용자의 RFP는 유지됩니다.`)) return;
+    const fd = new FormData(); fd.append('user_id', userId);
+    try {
+        const r = await fetch('api/admin/delete-user', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || '삭제 실패');
+        showToast('삭제 완료', 'success');
+        openAdminModal();
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
 }
 
 let wsRetryCount = 0;
@@ -175,7 +265,7 @@ function parseJsonSafe(text) {
 async function loadServerResults(rfpId) {
     if (!rfpId) return;
     try {
-        const resp = await fetch(`/api/rfp-detail/${rfpId}`);
+        const resp = await fetch(`api/rfp-detail/${rfpId}`);
         const data = await resp.json();
         if (data.results) Object.entries(data.results).forEach(([k, v]) => { cachedResults[k] = v; });
         // Auto-fill review tab with proposal text if available
@@ -209,7 +299,7 @@ async function selectRfp(rfpId) {
 async function deleteRfp(rfpId) {
     if (!confirm('이 RFP와 관련된 모든 데이터(제안서, 버전, 팀, 파이프라인)가 삭제됩니다. 계속하시겠습니까?')) return;
     try {
-        await fetch(`/api/rfp/${rfpId}`, { method: 'DELETE' });
+        await fetch(`api/rfp/${rfpId}`, { method: 'DELETE' });
         if (currentRfpId === rfpId) { currentRfpId = null; cachedResults = {}; }
         rfpList = rfpList.filter(r => r.id !== rfpId);
         updateRfpSelectors();
@@ -369,10 +459,138 @@ async function analyzePattern() {
 
 function renderPattern(data) {
     const e = el('patternResult'); let h = '';
-    if (data.industry_analysis) h += `<div class="card"><strong style="color:var(--accent)">산업 분석:</strong> <span style="color:var(--text-dim)">${data.industry_analysis}</span></div>`;
-    if (data.winning_patterns?.length) { h += `<div class="section-title">Winning 패턴</div>`; data.winning_patterns.forEach(p => { const b = p.confidence==='높음'?'badge-low':p.confidence==='중간'?'badge-medium':'badge-high'; h += `<div class="factor-item" style="border-left-color:var(--primary)"><strong>${p.pattern}</strong> <span class="badge ${b}">${p.confidence}</span><br><span style="color:var(--text-muted);font-size:13px">${p.description}</span></div>`; }); }
-    if (data.style_recommendations?.length) { h += `<div class="section-title">스타일 추천</div>`; data.style_recommendations.forEach(s => h += `<div class="factor-item" style="border-left-color:var(--accent)">${s}</div>`); }
-    if (data.differentiation_tips?.length) { h += `<div class="section-title">차별화 전략</div>`; data.differentiation_tips.forEach(t => h += `<div class="factor-item" style="border-left-color:var(--success)">${t}</div>`); }
+
+    if (data.industry_analysis) {
+        h += `<div class="card" style="margin-bottom:16px;border-left:4px solid var(--accent)">
+            <div class="card-title" style="font-size:15px;color:var(--accent)">산업 분석</div>
+            <p style="color:var(--text-dim);font-size:14px;line-height:1.7">${data.industry_analysis}</p>
+        </div>`;
+    }
+
+    // Customer profile
+    if (data.customer_profile) {
+        const cp = data.customer_profile;
+        h += `<div class="section-title">고객 프로파일</div><div class="card">`;
+        h += `<div style="margin-bottom:8px"><strong>유형:</strong> <span class="badge badge-medium">${cp.type||'-'}</span></div>`;
+        if (cp.decision_factors?.length) h += `<div style="margin-bottom:8px"><strong>의사결정 요인:</strong> ${cp.decision_factors.join(' > ')}</div>`;
+        if (cp.evaluation_weight_typical) {
+            h += `<div style="margin-bottom:8px"><strong>일반 평가 가중치:</strong><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">`;
+            Object.entries(cp.evaluation_weight_typical).forEach(([k,v]) => h += `<span class="badge badge-optional">${k} ${v}</span>`);
+            h += `</div></div>`;
+        }
+        if (cp.buying_signals?.length) h += `<div style="font-size:13px;color:var(--text-muted);margin-top:6px">✓ 우호 신호: ${cp.buying_signals.join(' / ')}</div>`;
+        if (cp.common_objections?.length) h += `<div style="font-size:13px;color:#fca5a5;margin-top:4px">⚠ 흔한 반대: ${cp.common_objections.join(' / ')}</div>`;
+        h += `</div>`;
+    }
+
+    // Winning patterns
+    if (data.winning_patterns?.length) {
+        h += `<div class="section-title">Winning 패턴 (통계 기반)</div>`;
+        data.winning_patterns.forEach(p => {
+            const b = p.confidence==='높음'?'badge-low':p.confidence==='중간'?'badge-medium':'badge-high';
+            h += `<div class="factor-item" style="border-left-color:var(--primary)"><strong>${p.pattern}</strong> <span class="badge ${b}">${p.confidence}</span><br>
+                <span style="color:var(--text-muted);font-size:13px">${p.description||''}</span>
+                ${p.example?`<br><span style="font-size:12px;color:#86efac">사례: ${p.example}</span>`:''}</div>`;
+        });
+    }
+
+    // Win Themes
+    if (data.win_themes?.length) {
+        h += `<div class="section-title">🏆 Win Themes</div>`;
+        data.win_themes.forEach((w,i) => {
+            h += `<div class="factor-item" style="border-left-color:#10b981"><strong>${i+1}. ${w.theme}</strong><br>
+                <span style="color:var(--text-dim);font-size:13px">${w.supporting_message||''}</span>
+                ${w.evidence_required?`<br><span style="font-size:12px;color:var(--accent)">필요 증거: ${w.evidence_required}</span>`:''}</div>`;
+        });
+    }
+
+    // Discriminators
+    if (data.discriminators?.length) {
+        h += `<div class="section-title">⚡ 차별화 포인트</div>`;
+        data.discriminators.forEach((d,i) => {
+            h += `<div class="factor-item" style="border-left-color:#f59e0b"><strong>${i+1}. ${d.discriminator}</strong><br>
+                <span style="font-size:12px;color:var(--text-muted)">증거: ${d.proof_point||''}</span>
+                ${d.competitor_gap?`<br><span style="font-size:12px;color:#86efac">경쟁사 대비: ${d.competitor_gap}</span>`:''}</div>`;
+        });
+    }
+
+    // Proof Points
+    if (data.proof_points?.length) {
+        h += `<div class="section-title">Proof Points (정량 근거)</div><table class="data-table"><thead><tr><th>분류</th><th>주장</th><th>증거</th></tr></thead><tbody>`;
+        data.proof_points.forEach(p => h += `<tr><td><strong>${p.category||''}</strong></td><td>${p.claim||''}</td><td style="font-size:12px;color:var(--success)">${p.evidence||''}</td></tr>`);
+        h += `</tbody></table>`;
+    }
+
+    // Ghost Team
+    if (data.ghost_team?.length) {
+        h += `<div class="section-title">👥 Ghost Team (경쟁사 분석)</div>`;
+        data.ghost_team.forEach(g => {
+            h += `<div class="card" style="margin-bottom:12px;border-left:4px solid #ef4444">
+                <div style="font-weight:700;margin-bottom:6px">${g.competitor||''}</div>
+                ${g.likely_positioning?`<div style="font-size:13px;margin-bottom:6px"><strong>예상 포지션:</strong> ${g.likely_positioning}</div>`:''}
+                ${g.strengths?.length?`<div style="font-size:12px;color:#fca5a5;margin-bottom:4px">강점: ${g.strengths.join(' / ')}</div>`:''}
+                ${g.weaknesses?.length?`<div style="font-size:12px;color:#86efac;margin-bottom:4px">약점: ${g.weaknesses.join(' / ')}</div>`:''}
+                ${g.counter_strategy?`<div style="font-size:13px;color:var(--accent);margin-top:6px">→ 대응 전략: ${g.counter_strategy}</div>`:''}
+            </div>`;
+        });
+    }
+
+    // Evaluator Personas
+    if (data.evaluator_personas?.length) {
+        h += `<div class="section-title">평가위원 페르소나</div><div class="grid-2">`;
+        data.evaluator_personas.forEach(p => {
+            h += `<div class="card">
+                <div style="font-weight:700;margin-bottom:4px">${p.role||''}</div>
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">${p.background||''}</div>
+                ${p.key_concerns?.length?`<div style="font-size:12px;margin-bottom:4px"><strong>관심사:</strong> ${p.key_concerns.join(', ')}</div>`:''}
+                ${p.expected_questions?.length?`<div style="font-size:12px;color:#fca5a5;margin-bottom:4px"><strong>예상 질문:</strong> ${p.expected_questions.join(' / ')}</div>`:''}
+                ${p.key_message_to_deliver?`<div style="font-size:12px;color:#86efac"><strong>전달 메시지:</strong> ${p.key_message_to_deliver}</div>`:''}
+            </div>`;
+        });
+        h += `</div>`;
+    }
+
+    // Price to Win
+    if (data.price_to_win) {
+        const p = data.price_to_win;
+        h += `<div class="section-title">💰 Price-to-Win</div><div class="card">
+            <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:10px">
+                <div><span style="color:var(--text-muted);font-size:12px">시장 평균</span><br><strong>${p.market_average_range||'-'}</strong></div>
+                <div><span style="color:var(--text-muted);font-size:12px">권장 포지션</span><br><strong style="color:var(--accent)">${p.recommended_position||'-'}</strong></div>
+                <div><span style="color:var(--text-muted);font-size:12px">가격 평가 가중치</span><br><strong>${p.price_weight||'-'}</strong></div>
+            </div>
+            ${p.rationale?`<div style="font-size:13px;color:var(--text-dim);line-height:1.6">${p.rationale}</div>`:''}
+            ${(p.low_price_threshold||p.high_price_threshold)?`<div style="font-size:12px;color:var(--text-muted);margin-top:8px">최저가 입찰 예상: ${p.low_price_threshold||'-'} | 고가 입찰 예상: ${p.high_price_threshold||'-'}</div>`:''}
+        </div>`;
+    }
+
+    if (data.style_recommendations?.length) {
+        h += `<div class="section-title">스타일 추천</div>`;
+        data.style_recommendations.forEach(s => h += `<div class="factor-item" style="border-left-color:var(--accent)">${s}</div>`);
+    }
+    if (data.differentiation_tips?.length) {
+        h += `<div class="section-title">차별화 액션</div>`;
+        data.differentiation_tips.forEach(t => h += `<div class="factor-item" style="border-left-color:var(--success)">${t}</div>`);
+    }
+
+    // Risk scenarios
+    if (data.risk_scenarios?.length) {
+        h += `<div class="section-title" style="border-color:#ef4444">수주 리스크 시나리오</div><table class="data-table"><thead><tr><th>시나리오</th><th>발생가능성</th><th>영향</th><th>대응</th></tr></thead><tbody>`;
+        data.risk_scenarios.forEach(r => {
+            const pb = r.probability==='상'?'badge-high':r.probability==='중'?'badge-medium':'badge-low';
+            const ib = r.impact==='치명'||r.impact==='상'?'badge-high':r.impact==='중'?'badge-medium':'badge-low';
+            h += `<tr><td><strong>${r.scenario||''}</strong></td><td><span class="badge ${pb}">${r.probability||'-'}</span></td><td><span class="badge ${ib}">${r.impact||'-'}</span></td><td style="font-size:12px;color:var(--text-muted)">${r.mitigation||''}</td></tr>`;
+        });
+        h += `</tbody></table>`;
+    }
+
+    // Action plan
+    if (data.action_plan?.length) {
+        h += `<div class="section-title">📋 Action Plan (제안 마감까지)</div><table class="data-table"><thead><tr><th>액션</th><th>담당</th><th>마감</th></tr></thead><tbody>`;
+        data.action_plan.forEach(a => h += `<tr><td><strong>${a.action||''}</strong></td><td>${a.owner||'-'}</td><td style="color:var(--accent)">${a.due||'-'}</td></tr>`);
+        h += `</tbody></table>`;
+    }
+
     e.innerHTML = h;
 }
 
@@ -438,6 +656,40 @@ function renderProposal(data, rawText) {
             <p style="color:var(--text-muted);font-size:13px">${new Date().toLocaleDateString('ko-KR')} | AI 자동 생성</p>
         </div>`;
 
+        // Executive Summary
+        if (data.executive_summary) {
+            h += `<div class="card" style="margin-bottom:20px;border-left:4px solid var(--primary)">
+                <div class="card-title" style="font-size:16px;color:var(--primary-light)">Executive Summary</div>
+                <p style="color:var(--text-dim);font-size:14px;line-height:1.9">${data.executive_summary}</p>
+            </div>`;
+        }
+
+        // Win Themes
+        if (data.win_themes?.length) {
+            h += `<div class="section-title">🏆 Win Themes</div><div class="grid-2" style="margin-bottom:20px">`;
+            data.win_themes.forEach((w,i) => {
+                h += `<div class="card" style="border-left:4px solid #10b981"><strong style="color:#10b981">${i+1}. ${w.theme}</strong><br><span style="color:var(--text-dim);font-size:13px">${w.message||''}</span></div>`;
+            });
+            h += `</div>`;
+        }
+
+        // Discriminators
+        if (data.discriminators?.length) {
+            h += `<div class="section-title">⚡ 차별화 포인트 (Discriminators)</div>`;
+            data.discriminators.forEach((d,i) => {
+                h += `<div class="factor-item" style="border-left-color:#f59e0b"><strong>${i+1}. ${d.point}</strong><br><span style="font-size:12px;color:var(--text-muted)">증거: ${d.proof||''}</span></div>`;
+            });
+        }
+
+        // Evaluation Mapping
+        if (data.evaluation_mapping?.length) {
+            h += `<div class="section-title">📊 평가기준 매핑</div><table class="data-table"><thead><tr><th>평가항목</th><th>배점</th><th>대응 섹션</th><th>핵심 메시지</th></tr></thead><tbody>`;
+            data.evaluation_mapping.forEach(m => {
+                h += `<tr><td><strong>${m.criteria}</strong></td><td><span class="badge badge-medium">${m.weight}</span></td><td style="color:var(--accent)">${m.section_ref}</td><td style="font-size:12px;color:var(--text-muted)">${m.key_message}</td></tr>`;
+            });
+            h += `</tbody></table>`;
+        }
+
         // TOC
         if (data.table_of_contents?.length) {
             h += `<div class="card" style="margin-bottom:20px"><div class="card-title" style="font-size:16px">목차</div>`;
@@ -473,6 +725,35 @@ function renderProposal(data, rawText) {
                 h += `</div></div>`;
                 secIdx++;
             });
+        }
+
+        // References summary
+        if (data.references_summary?.length) {
+            h += `<div class="section-title">유사 프로젝트 실적 요약</div><table class="data-table"><thead><tr><th>고객사</th><th>프로젝트</th><th>기간</th><th>규모</th><th>성과</th></tr></thead><tbody>`;
+            data.references_summary.forEach(r => {
+                h += `<tr><td><strong>${r.customer||''}</strong></td><td>${r.project||''}</td><td>${r.period||''}</td><td>${r.scale||''}</td><td style="font-size:12px;color:var(--success)">${r.outcome||''}</td></tr>`;
+            });
+            h += `</tbody></table>`;
+        }
+
+        // Key personnel
+        if (data.key_personnel?.length) {
+            h += `<div class="section-title">핵심 투입 인력</div><table class="data-table"><thead><tr><th>역할</th><th>등급</th><th>경력</th><th>자격</th><th>대표 이력</th></tr></thead><tbody>`;
+            data.key_personnel.forEach(p => {
+                h += `<tr><td><strong>${p.role||''}</strong></td><td><span class="badge badge-optional">${p.grade||'-'}</span></td><td>${p.years||'-'}</td><td>${p.certs||'-'}</td><td style="font-size:12px;color:var(--text-muted)">${p.highlight||''}</td></tr>`;
+            });
+            h += `</tbody></table>`;
+        }
+
+        // Risk register
+        if (data.risk_register?.length) {
+            h += `<div class="section-title" style="border-color:#ef4444">리스크 등록부</div><table class="data-table"><thead><tr><th>리스크</th><th>영향</th><th>발생가능성</th><th>대응 방안</th></tr></thead><tbody>`;
+            data.risk_register.forEach(r => {
+                const ib = r.impact==='상'?'badge-high':r.impact==='중'?'badge-medium':'badge-low';
+                const lb = r.likelihood==='상'?'badge-high':r.likelihood==='중'?'badge-medium':'badge-low';
+                h += `<tr><td><strong>${r.risk||''}</strong></td><td><span class="badge ${ib}">${r.impact||'-'}</span></td><td><span class="badge ${lb}">${r.likelihood||'-'}</span></td><td style="font-size:12px;color:var(--text-muted)">${r.mitigation||''}</td></tr>`;
+            });
+            h += `</tbody></table>`;
         }
     } else {
         // ── Raw text fallback: still render nicely ──
@@ -523,9 +804,52 @@ function renderEstimate(data) {
     h += `<div style="text-align:center;margin-bottom:24px">
         <div style="font-size:14px;color:var(--text-muted)">${data.project_name || ''}</div>
         <div style="font-size:42px;font-weight:800;color:var(--accent);margin:8px 0">${data.total_cost || '산출 중'}</div>
-        <div style="font-size:14px;color:var(--text-muted)">예상 기간: ${data.duration_months || '-'}개월</div>
-        <div style="font-size:13px;color:var(--text-dim);margin-top:8px;max-width:600px;margin-left:auto;margin-right:auto">${data.summary || ''}</div>
+        ${data.total_cost_with_vat ? `<div style="font-size:14px;color:var(--text-muted)">VAT 포함: <strong style="color:var(--text)">${data.total_cost_with_vat}</strong></div>` : ''}
+        <div style="font-size:14px;color:var(--text-muted);margin-top:4px">예상 기간: ${data.duration_months || '-'}개월</div>
+        <div style="font-size:13px;color:var(--text-dim);margin-top:8px;max-width:700px;margin-left:auto;margin-right:auto;line-height:1.7">${data.summary || ''}</div>
     </div>`;
+
+    // Pricing options (3 strategy)
+    if (data.pricing_options?.length) {
+        h += `<div class="section-title">가격 전략 옵션</div><div class="grid-3" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:20px">`;
+        data.pricing_options.forEach((o,i) => {
+            const isBase = o.option?.includes('Base') || o.option?.includes('권장');
+            const isAggr = o.option?.includes('Aggressive') || o.option?.includes('저가');
+            const c = isBase ? '#10b981' : (isAggr ? '#f59e0b' : '#8b5cf6');
+            h += `<div class="card" style="border-top:3px solid ${c};text-align:center">
+                <div style="font-size:13px;color:var(--text-muted);margin-bottom:4px">${o.option}</div>
+                <div style="font-size:22px;font-weight:700;color:${c}">${o.total}</div>
+                ${o.win_probability?`<div style="font-size:12px;color:var(--text-dim);margin-top:4px">수주 확률 <strong>${o.win_probability}</strong></div>`:''}
+                <div style="font-size:11px;color:var(--text-muted);margin-top:8px;line-height:1.5">${o.rationale||''}</div>
+            </div>`;
+        });
+        h += `</div>`;
+    }
+
+    // Market comparison
+    if (data.market_comparison) {
+        const m = data.market_comparison;
+        h += `<div class="card" style="margin-bottom:20px;border-left:4px solid var(--accent)">
+            <div class="card-title" style="font-size:15px">시장 평균 비교</div>
+            <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center">
+                <div><span style="color:var(--text-muted);font-size:13px">시장 평균</span><br><strong style="color:var(--text-dim);font-size:16px">${m.market_average||'-'}</strong></div>
+                <div><span style="color:var(--text-muted);font-size:13px">본 견적</span><br><strong style="color:var(--accent);font-size:16px">${m.our_total||'-'}</strong></div>
+                <div><span style="color:var(--text-muted);font-size:13px">차이</span><br><strong style="color:${m.delta_pct?.includes('-')?'#10b981':'#ef4444'};font-size:16px">${m.delta_pct||'-'}</strong></div>
+            </div>
+            ${m.interpretation?`<div style="margin-top:10px;font-size:12px;color:var(--text-muted)">${m.interpretation}</div>`:''}
+        </div>`;
+    }
+
+    // Labor rate basis
+    if (data.labor_rate_basis?.rates?.length) {
+        h += `<div class="section-title">노임단가 산정 근거</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">출처: ${data.labor_rate_basis.source||''}</div>
+        <table class="data-table"><thead><tr><th>등급</th><th>연 단가</th><th>월 단가 (실투입 기준)</th></tr></thead><tbody>`;
+        data.labor_rate_basis.rates.forEach(rate => {
+            h += `<tr><td><strong>${rate.grade}</strong></td><td>${rate.annual||'-'}</td><td style="color:var(--accent)">${rate.monthly||'-'}</td></tr>`;
+        });
+        h += `</tbody></table>`;
+    }
 
     // Cost breakdown bar chart
     if (data.categories?.length) {
@@ -583,6 +907,35 @@ function renderEstimate(data) {
             }
             h += `</tbody></table>`;
         });
+    }
+
+    // Phase breakdown
+    if (data.phase_breakdown?.length) {
+        h += `<div class="section-title">Phase별 비용 분배</div><table class="data-table"><thead><tr><th>Phase</th><th>월</th><th>비용</th><th>주요 산출물</th></tr></thead><tbody>`;
+        data.phase_breakdown.forEach(p => {
+            h += `<tr><td><strong>${p.phase||''}</strong></td><td>${p.months||'-'}</td><td style="color:var(--accent);font-weight:600">${p.cost||'-'}</td><td style="font-size:12px;color:var(--text-muted)">${p.deliverables||''}</td></tr>`;
+        });
+        h += `</tbody></table>`;
+    }
+
+    // Cost structure
+    if (data.cost_structure) {
+        const c = data.cost_structure;
+        h += `<div class="section-title">비용 구조 분해 (직접비 → 총액)</div><table class="data-table"><thead><tr><th>구분</th><th>금액</th></tr></thead><tbody>`;
+        if (c.direct_cost) h += `<tr><td>직접비 (인건비+SW+HW+기타)</td><td style="font-weight:600">${c.direct_cost}</td></tr>`;
+        ['general_admin','profit','contingency','vat'].forEach(k => {
+            if (c[k]) h += `<tr><td>${c[k].label||k}</td><td style="color:var(--accent)">${c[k].amount}</td></tr>`;
+        });
+        h += `</tbody></table>`;
+    }
+
+    // Payment milestones
+    if (data.payment_milestones?.length) {
+        h += `<div class="section-title">결제 마일스톤</div><table class="data-table"><thead><tr><th>단계</th><th>비율</th><th>금액</th><th>지급 조건</th></tr></thead><tbody>`;
+        data.payment_milestones.forEach(m => {
+            h += `<tr><td><strong>${m.milestone||''}</strong></td><td><span class="badge badge-medium">${m.ratio||'-'}</span></td><td style="color:var(--accent);font-weight:600">${m.amount||'-'}</td><td style="font-size:12px;color:var(--text-muted)">${m.trigger||''}</td></tr>`;
+        });
+        h += `</tbody></table>`;
     }
 
     // Risks
@@ -680,15 +1033,104 @@ async function reviewProposal() {
 function renderReview(data) {
     const e = el('reviewResult'); let h = '';
     const score = data.overall_score || 0, color = score>=80?'#10b981':score>=60?'#f59e0b':'#ef4444';
-    h += `<div class="score-circle" style="border:4px solid ${color}"><span class="number" style="color:${color}">${score}</span><span class="label">${data.grade||''}</span></div>`;
+
+    // Header — overall + win prob + summary
+    h += `<div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin-bottom:20px">
+        <div class="score-circle" style="border:4px solid ${color};margin:0"><span class="number" style="color:${color}">${score}</span><span class="label">${data.grade||''}</span></div>
+        <div style="flex:1;min-width:260px">
+            ${data.weighted_score!=null ? `<div style="font-size:13px;color:var(--text-muted)">가중 평균 점수 <strong style="color:${color};font-size:16px">${data.weighted_score}</strong></div>` : ''}
+            ${data.win_probability ? `<div style="font-size:13px;color:var(--text-muted)">수주 확률 <strong style="color:var(--accent);font-size:16px">${data.win_probability}</strong></div>` : ''}
+            ${data.summary ? `<p style="margin-top:10px;color:var(--text-dim);font-size:14px;line-height:1.7">${data.summary}</p>` : ''}
+        </div>
+    </div>`;
+
+    // Review items
     if (data.review_items?.length) {
         h += `<div class="section-title">항목별 평가</div><table class="data-table"><thead><tr><th>항목</th><th>점수</th><th>상태</th><th>코멘트</th></tr></thead><tbody>`;
-        data.review_items.forEach(r => { const bc = r.score>=80?'#10b981':r.score>=60?'#f59e0b':'#ef4444'; const sb = r.status==='양호'?'badge-low':r.status==='보통'?'badge-medium':'badge-high'; h += `<tr><td><strong>${r.category}</strong></td><td><div class="progress-bar" style="width:80px;display:inline-block;vertical-align:middle"><div class="fill" style="width:${r.score}%;background:${bc}"></div></div> <span style="color:${bc}">${r.score}</span></td><td><span class="badge ${sb}">${r.status}</span></td><td style="font-size:13px;color:var(--text-dim)">${r.comment}</td></tr>`; });
+        data.review_items.forEach(r => { const bc = r.score>=80?'#10b981':r.score>=60?'#f59e0b':'#ef4444'; const sb = r.status==='양호'?'badge-low':r.status==='보통'?'badge-medium':'badge-high'; h += `<tr><td><strong>${r.category}</strong></td><td><div class="progress-bar" style="width:80px;display:inline-block;vertical-align:middle"><div class="fill" style="width:${r.score}%;background:${bc}"></div></div> <span style="color:${bc}">${r.score}/${r.max||100}</span></td><td><span class="badge ${sb}">${r.status}</span></td><td style="font-size:13px;color:var(--text-dim)">${r.comment}</td></tr>`; });
         h += '</tbody></table>';
     }
-    if (data.missing_requirements?.length) { h += `<div class="section-title">누락된 요구사항</div>`; data.missing_requirements.forEach(m => h += `<div class="factor-item" style="border-left-color:#ef4444">${m}</div>`); }
-    if (data.logic_issues?.length) { h += `<div class="section-title">논리 불일치</div>`; data.logic_issues.forEach(l => h += `<div class="factor-item" style="border-left-color:#f59e0b">${l}</div>`); }
-    if (data.improvement_suggestions?.length) { h += `<div class="section-title">개선 제안</div>`; data.improvement_suggestions.forEach(s => h += `<div class="factor-item" style="border-left-color:var(--primary)">${s}</div>`); }
+
+    // Evaluator perspectives
+    if (data.evaluator_perspectives?.length) {
+        h += `<div class="section-title">평가위원 관점별 점수</div><div class="grid-2">`;
+        data.evaluator_perspectives.forEach(p => {
+            const bc = p.score>=80?'#10b981':p.score>=60?'#f59e0b':'#ef4444';
+            h += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><strong>${p.persona}</strong><span style="color:${bc};font-weight:700;font-size:18px">${p.score}</span></div>
+                ${p.key_strength ? `<div style="font-size:12px;color:#10b981;margin-bottom:4px">✓ ${p.key_strength}</div>`:''}
+                ${p.key_concern ? `<div style="font-size:12px;color:#ef4444">⚠ ${p.key_concern}</div>`:''}</div>`;
+        });
+        h += `</div>`;
+    }
+
+    // Requirements traceability
+    if (data.requirements_traceability?.length) {
+        h += `<div class="section-title">요구사항 추적성 매트릭스</div><table class="data-table"><thead><tr><th>REQ ID</th><th>요구사항</th><th>상태</th><th>대응 섹션</th><th>근거 / 보완점</th></tr></thead><tbody>`;
+        data.requirements_traceability.forEach(t => {
+            const sb = t.status==='충족'?'badge-low':t.status==='부분충족'?'badge-medium':'badge-high';
+            h += `<tr><td><code>${t.req_id||''}</code></td><td>${t.title||''}</td><td><span class="badge ${sb}">${t.status}</span></td><td style="color:var(--accent)">${t.section_ref||'-'}</td><td style="font-size:12px;color:var(--text-muted)">${t.evidence||t.gap||''}</td></tr>`;
+        });
+        h += `</tbody></table>`;
+    }
+
+    // Section analysis
+    if (data.section_analysis?.length) {
+        h += `<div class="section-title">섹션별 강약점 분석</div>`;
+        data.section_analysis.forEach(s => {
+            h += `<div class="factor-item" style="border-left-color:var(--primary)"><strong>${s.section}</strong>`;
+            if (s.strengths?.length) h += `<div style="font-size:12px;color:#10b981;margin-top:4px">강점: ${s.strengths.join(' / ')}</div>`;
+            if (s.weaknesses?.length) h += `<div style="font-size:12px;color:#ef4444;margin-top:2px">약점: ${s.weaknesses.join(' / ')}</div>`;
+            h += `</div>`;
+        });
+    }
+
+    // Missing requirements
+    if (data.missing_requirements?.length) {
+        h += `<div class="section-title">누락된 요구사항</div>`;
+        data.missing_requirements.forEach(m => {
+            if (typeof m === 'string') { h += `<div class="factor-item" style="border-left-color:#ef4444">${m}</div>`; return; }
+            const sb = m.severity==='치명적'?'badge-high':m.severity==='높음'?'badge-medium':'badge-low';
+            h += `<div class="factor-item" style="border-left-color:#ef4444"><code>${m.req_id||''}</code> <span class="badge ${sb}">${m.severity||''}</span><br>${m.description||''}</div>`;
+        });
+    }
+
+    // Logic issues
+    if (data.logic_issues?.length) {
+        h += `<div class="section-title">논리 불일치</div>`;
+        data.logic_issues.forEach(l => {
+            if (typeof l === 'string') { h += `<div class="factor-item" style="border-left-color:#f59e0b">${l}</div>`; return; }
+            h += `<div class="factor-item" style="border-left-color:#f59e0b"><strong>${l.issue||''}</strong>${l.where?` <span style="color:var(--text-muted);font-size:12px">(${l.where})</span>`:''}${l.fix?`<br><span style="font-size:12px;color:var(--accent)">→ ${l.fix}</span>`:''}</div>`;
+        });
+    }
+
+    // Improvement suggestions
+    if (data.improvement_suggestions?.length) {
+        h += `<div class="section-title">우선순위 개선 제안</div>`;
+        data.improvement_suggestions.forEach(s => {
+            if (typeof s === 'string') { h += `<div class="factor-item" style="border-left-color:var(--primary)">${s}</div>`; return; }
+            const pb = s.priority==='P0'?'badge-high':s.priority==='P1'?'badge-medium':'badge-low';
+            h += `<div class="factor-item" style="border-left-color:var(--primary)"><span class="badge ${pb}">${s.priority||''}</span> <span style="color:var(--text-muted);font-size:12px">(${s.effort||''})</span><br><strong>${s.suggestion||''}</strong>${s.impact?`<br><span style="font-size:12px;color:#10b981">예상 효과: ${s.impact}</span>`:''}</div>`;
+        });
+    }
+
+    // Wording improvements
+    if (data.wording_improvements?.length) {
+        h += `<div class="section-title">문장 개선 예시</div><table class="data-table"><thead><tr><th>현재</th><th>개선안</th><th>이유</th></tr></thead><tbody>`;
+        data.wording_improvements.forEach(w => {
+            h += `<tr><td style="color:#fca5a5">${w.before||''}</td><td style="color:#86efac">${w.after||''}</td><td style="font-size:12px;color:var(--text-muted)">${w.why||''}</td></tr>`;
+        });
+        h += `</tbody></table>`;
+    }
+
+    // Competitor gaps
+    if (data.competitor_gaps?.length) {
+        h += `<div class="section-title">경쟁사 대비 포지셔닝</div><table class="data-table"><thead><tr><th>영역</th><th>당사 포지션</th><th>리스크</th><th>대응 전략</th></tr></thead><tbody>`;
+        data.competitor_gaps.forEach(c => {
+            h += `<tr><td><strong>${c.area||''}</strong></td><td>${c.our_position||''}</td><td style="color:#fca5a5">${c.risk||'-'}</td><td style="color:#86efac">${c.counter||''}</td></tr>`;
+        });
+        h += `</tbody></table>`;
+    }
+
     e.innerHTML = h;
 }
 
@@ -819,7 +1261,7 @@ async function refreshHistoryBar(step) {
     if (!bar) return;
     if (!rfpId) { bar.innerHTML = ''; return; }
     try {
-        const resp = await fetch(`/api/history/${rfpId}?step=${step}`);
+        const resp = await fetch(`api/history/${rfpId}?step=${step}`);
         const data = await resp.json();
         if (!data.history?.length) { bar.innerHTML = ''; return; }
         const sorted = data.history.slice().sort((a, b) => a.version - b.version);
@@ -838,7 +1280,7 @@ async function loadHistoryVersion(step, version) {
     const rfpId = currentRfpId;
     if (!rfpId) return;
     try {
-        const resp = await fetch(`/api/history/${rfpId}?step=${step}`);
+        const resp = await fetch(`api/history/${rfpId}?step=${step}`);
         const data = await resp.json();
         const item = data.history.find(h => h.version === version);
         if (!item) return;
@@ -867,7 +1309,7 @@ async function loadHistoryVersion(step, version) {
 async function loadHistory(step) {
     const rfpId = el('historyRfpSelect')?.value || currentRfpId;
     if (!rfpId) { showToast('RFP를 선택해주세요.', 'warning'); return; }
-    const url = step ? `/api/history/${rfpId}?step=${step}` : `/api/history/${rfpId}`;
+    const url = step ? `api/history/${rfpId}?step=${step}` : `api/history/${rfpId}`;
     try {
         const resp = await fetch(url);
         const data = await resp.json();
@@ -908,7 +1350,7 @@ function renderHistory(items, rfpId) {
 }
 
 async function applyHistory(rfpId, step, idx) {
-    const resp = await fetch(`/api/history/${rfpId}?step=${step}`);
+    const resp = await fetch(`api/history/${rfpId}?step=${step}`);
     const data = await resp.json();
     const items = data.history.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     if (!items[idx]) return;
@@ -947,7 +1389,7 @@ async function loadVersions(rfpId) {
     rfpId = rfpId || el('versionRfpSelect')?.value || currentRfpId;
     if (!rfpId) return;
     try {
-        const resp = await fetch(`/api/version/list/${rfpId}`);
+        const resp = await fetch(`api/version/list/${rfpId}`);
         const data = await resp.json();
         renderVersions(data.versions);
     } catch {}
@@ -1040,7 +1482,7 @@ async function loadTeam() {
     const rfpId = el('teamRfpSelect')?.value || currentRfpId;
     if (!rfpId) return;
     try {
-        const resp = await fetch(`/api/team/${rfpId}`);
+        const resp = await fetch(`api/team/${rfpId}`);
         const data = await resp.json();
         teamMembers = data.members;
         renderMembers(data.members);
@@ -1161,8 +1603,8 @@ function renderSchedule(data) {
 }
 
 // ─── Init ───
-document.addEventListener('DOMContentLoaded', () => {
-    initUpload(); loadKnowledge(); refreshDashboard(); loadProposalInputs();
+document.addEventListener('DOMContentLoaded', async () => {
+    initUpload(); loadProposalInputs();
     // Auto-save proposal inputs on typing
     ['companyInfo', 'references'].forEach(id => {
         const e = el(id);
@@ -1173,13 +1615,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.target.classList.contains('rfp-select') && e.target.value) selectRfp(e.target.value);
     });
 
-    // Restore username from localStorage
-    const saved = localStorage.getItem('rfp_username');
-    if (saved) {
-        currentUsername = saved;
-        el('usernameModal').classList.remove('show');
-        connectWebSocket(saved);
-    } else {
-        el('usernameInput').focus();
+    // Check authentication session
+    try {
+        const r = await fetch('api/auth/me', { credentials: 'same-origin' });
+        const data = await r.json();
+        if (data.user) {
+            onAuthed(data.user);
+        } else {
+            el('authUsername').focus();
+        }
+    } catch {
+        el('authUsername').focus();
     }
 });

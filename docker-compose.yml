@@ -18,13 +18,16 @@ services:
     restart: unless-stopped
 
   app:
-    build: .
+    image: 20.20.6.248:5000/ai-rfp:${IMAGE_TAG:-260518}
     container_name: rfp-ai
     ports:
       - "9000:9000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-rfp}:${POSTGRES_PASSWORD:-rfp1234}@db:5432/${POSTGRES_DB:-rfpdb}
+      - SESSION_SECRET=${SESSION_SECRET:-rfp-dev-secret-change-me}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin1234}
     volumes:
       - rfp-uploads:/app/uploads
       - rfp-data:/app/data

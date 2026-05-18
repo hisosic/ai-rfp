@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
 
 try:
     import anthropic
@@ -23,11 +24,53 @@ except ImportError:
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="RFP AI Analyzer", version="2.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+_allowed = os.environ.get("ALLOWED_ORIGINS", "").strip()
+_cors_origins = [o.strip() for o in _allowed.split(",") if o.strip()] if _allowed else []
+if _cors_origins:
+    app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+
+_session_secret = os.environ.get("SESSION_SECRET", "rfp-dev-secret-change-me")
+_session_https_only = os.environ.get("SESSION_HTTPS_ONLY", "1") == "1"
+app.add_middleware(SessionMiddleware, secret_key=_session_secret, same_site="lax", https_only=_session_https_only, max_age=60*60*24*30)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 import db
+
+
+# ─── Auth helpers ───
+
+def current_user(request: Request):
+    uid = request.session.get("uid")
+    if not uid:
+        return None
+    return db.get_user_by_id(uid)
+
+
+def require_user(request: Request):
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "로그인이 필요합니다.")
+    return user
+
+
+def require_admin(request: Request):
+    user = require_user(request)
+    if not user.get("is_admin"):
+        raise HTTPException(403, "관리자 권한이 필요합니다.")
+    return user
+
+
+def check_rfp_access(request: Request, rfp_id: str):
+    """Verify the current user can access this RFP. Returns user dict."""
+    user = require_user(request)
+    if user.get("is_admin"):
+        return user
+    owner = db.rfp_owner(rfp_id)
+    if owner is not None and owner != user["id"]:
+        raise HTTPException(403, "해당 RFP에 접근 권한이 없습니다.")
+    return user
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -137,68 +180,211 @@ def generate_mock_response(mock_type: str) -> str:
         }, ensure_ascii=False, indent=2)
     elif mock_type == "pattern":
         return json.dumps({
-            "industry_analysis": "IT/디지털 전환 프로젝트",
+            "industry_analysis": "한국 공공/대기업 디지털 전환 시장은 연 12% 성장 중이며, 2024년 이후 MSA·클라우드 전환·데이터 통합 영역의 발주가 집중되고 있습니다. 평가는 기술이해도(30%), 수행경험(25%), 가격(20%) 비중이 지배적이며 보안 통제 항목이 매년 강화되는 추세입니다.",
+            "customer_profile": {
+                "type": "공공기관 (광역 지자체/공기업)",
+                "decision_factors": ["기술 신뢰성", "유사 사업 수행 경험", "가격 적정성", "유지보수 체계"],
+                "evaluation_weight_typical": {"기술 이해도": "30%", "수행 경험": "25%", "가격 적정성": "20%", "프로젝트 관리": "15%", "기술 지원": "10%"},
+                "buying_signals": ["사전 영업 미팅 빈도 (3회 이상이면 우호적)", "RFP 내 특정 솔루션 키워드 언급", "기술 사전 데모 요청"],
+                "common_objections": ["초기 도입 비용 부담", "내부 인력의 전환 학습 부담", "기존 시스템과의 호환성 우려"],
+            },
             "winning_patterns": [
-                {"pattern": "기술 역량 강조", "description": "클라우드 네이티브 아키텍처 경험과 마이크로서비스 전환 실적을 전면에 배치", "confidence": "높음"},
-                {"pattern": "ROI 수치화", "description": "도입 후 예상 비용 절감률(30~40%)과 생산성 향상 지표를 구체적으로 제시", "confidence": "높음"},
-                {"pattern": "리스크 선제 대응", "description": "예상 리스크와 대응 방안을 별도 섹션으로 구성하여 신뢰도 확보", "confidence": "중간"},
-                {"pattern": "단계적 접근", "description": "Big Bang이 아닌 Phase별 접근으로 리스크 최소화 전략 제시", "confidence": "높음"},
+                {"pattern": "검증된 안정성 강조", "description": "동일 영역 다수 사업 수행 실적 + 정량 성과(가용성/만족도)를 전면 배치", "confidence": "높음", "example": "A공사 통합관제 수주 시 12건 레퍼런스 + 가용성 99.97% 강조로 기술평가 1위"},
+                {"pattern": "단계적 전환 (Phased Approach)", "description": "Big Bang 대신 3단계 점진 전환으로 운영 리스크 최소화", "confidence": "높음", "example": "B금융 코어뱅킹 MSA 전환 시 무중단 단계적 전환으로 채택"},
+                {"pattern": "TCO 절감 수치화", "description": "직접 견적 외 3년 누적 운영비 절감 효과를 정량 제시", "confidence": "높음", "example": "11.4억 TCO 절감 자료가 가격 평가 가산"},
+                {"pattern": "특급 인력 풀투입", "description": "PM/Tech Lead 특급 인력 풀타임 명시", "confidence": "중간", "example": "공공기관 평가위원이 특히 선호"},
+                {"pattern": "Win Theme 3개 부각", "description": "제안서 전반에 일관된 3개 핵심 메시지 반복", "confidence": "중간", "example": "Shipley 방법론 적용 시 일관성 향상"},
+                {"pattern": "리스크 선제 대응", "description": "리스크 등록부 5개 이상 + 정량 대응 방안 제시", "confidence": "중간", "example": "프로젝트 관리 평가 가산 효과"},
+                {"pattern": "사전 PoC 제공", "description": "제안 단계에서 핵심 기능 PoC 시연/영상 제공", "confidence": "높음", "example": "C기관 데이터 통합 사업 수주의 결정적 요인"},
             ],
+            "win_themes": [
+                {"theme": "검증된 안정성, 측정된 가치", "supporting_message": "동일 영역 12건 무중단 운영 — 가용성 99.95% 검증된 시스템", "evidence_required": "최근 3년 레퍼런스 표, 정량 성과"},
+                {"theme": "단계적 위험 최소화 (Zero Downtime)", "supporting_message": "Big Bang이 아닌 3단계 점진 전환으로 운영 중단 Zero", "evidence_required": "Phase별 일정·검수 계획, 유사 사례 무중단 전환 영상"},
+                {"theme": "총소유비용(TCO) 절감", "supporting_message": "Auto-Scaling으로 인프라 30%, 운영 인력 25% 절감", "evidence_required": "TCO 3년 시뮬레이션 자료"},
+            ],
+            "discriminators": [
+                {"discriminator": "공공/금융 동일 분야 12건 수행", "proof_point": "최근 3년 누적 240억원 / 평균 만족도 4.7/5.0", "competitor_gap": "경쟁사 대비 2~3배 수행 실적"},
+                {"discriminator": "자체 보유 통합 모니터링 자산", "proof_point": "200+ 운영 지표 자동 수집·알람 체계 (자체 개발 + Datadog)", "competitor_gap": "Day 1부터 운영 가시화 가능"},
+                {"discriminator": "특급 PMP 인력 3명 풀타임 투입 보장", "proof_point": "PMP/정보관리기술사 보유, 평균 경력 18년", "competitor_gap": "통상 1~2명 수준의 경쟁사 대비 우위"},
+                {"discriminator": "Shipley 방법론 기반 제안 표준화", "proof_point": "APMP 인증 인력 5명 보유", "competitor_gap": "제안 일관성/추적성 우수"},
+            ],
+            "proof_points": [
+                {"category": "수행 실적", "claim": "동일 영역 12건 수행", "evidence": "최근 3년 누적 240억원, 평균 만족도 4.7/5.0"},
+                {"category": "기술 역량", "claim": "정보관리기술사 3명 보유", "evidence": "사내 인력 명부 검증, 자격증 사본 제출 가능"},
+                {"category": "운영 안정성", "claim": "가용성 99.95% 보장", "evidence": "최근 12건 평균 SLA 달성률 99.97%"},
+                {"category": "고객 만족", "claim": "5년 연속 NPS 90+", "evidence": "외부 컨설팅 만족도 조사 결과"},
+                {"category": "보안", "claim": "ISO 27001 + ISMS-P 인증", "evidence": "인증서 사본 제출 가능"},
+                {"category": "방법론", "claim": "Shipley/APMP 인증 5명", "evidence": "사내 자격 보유자 명단"},
+            ],
+            "ghost_team": [
+                {"competitor": "경쟁사 A (대형 SI)", "strengths": ["대형 레퍼런스 다수", "안정적 자금력"], "weaknesses": ["특정 기술 영역 외주 의존", "프로젝트 관리 표준화 약점"], "likely_positioning": "안정성 + 글로벌 레퍼런스 + 중상위 가격", "counter_strategy": "특급 인력 풀투입 보장 + 자체 모니터링 자산 차별화"},
+                {"competitor": "경쟁사 B (전문 SI)", "strengths": ["가격 경쟁력", "민첩한 의사결정"], "weaknesses": ["수행 실적 부족", "유지보수 체계 약함"], "likely_positioning": "최저가 + 신속 납기", "counter_strategy": "TCO 절감 수치화 + 검증된 안정성 강조"},
+                {"competitor": "경쟁사 C (외산 솔루션 파트너)", "strengths": ["솔루션 기술력"], "weaknesses": ["커스터마이징 한계", "한국 시장 이해 부족"], "likely_positioning": "솔루션 중심 + 고가", "counter_strategy": "한국형 커스터마이징 + 한국 레퍼런스 부각"},
+            ],
+            "evaluator_personas": [
+                {"role": "기술 평가위원 (CIO/정보화책임관)", "background": "발주처 정보화 총괄. 신기술 도입 결정 권한", "key_concerns": ["기술 적합성", "안정성", "확장성"], "expected_questions": ["MSA 전환 시 운영 부담은?", "기존 ERP 연동 안정성은?"], "key_message_to_deliver": "검증된 12건의 무중단 전환 경험으로 위험을 최소화합니다"},
+                {"role": "사업 평가위원 (구매/예산 담당)", "background": "예산 관리 + 계약 검토", "key_concerns": ["가격 적정성", "예산 일치", "리스크"], "expected_questions": ["시장 평균 대비 가격은?", "예산 초과 리스크는?"], "key_message_to_deliver": "시장 평균 -8%, TCO 3년 11.4억 절감으로 Value for Money 최고"},
+                {"role": "사용자 대표 (현업 부서장)", "background": "실제 사용자 의견 대표", "key_concerns": ["사용 편의성", "운영 부담", "교육"], "expected_questions": ["기존 시스템 익숙한데 학습 부담은?"], "key_message_to_deliver": "동일 화면/조작 체계 유지 + 40시간 무상 교육 제공"},
+            ],
+            "price_to_win": {
+                "market_average_range": "5억 8,000만원 ~ 6억 5,000만원",
+                "recommended_position": "5억 6,000만원 (시장 평균 -8%)",
+                "rationale": "공공 사업 가격 평가 가중치 20%, 최저가 입찰사 대비 5% 이내 차이 권장. -8%면 가격 평가 가산 + 마진 유지 가능",
+                "price_weight": "20%",
+                "low_price_threshold": "5억 2,000만원 (이하 시 적정성 의심 우려)",
+                "high_price_threshold": "6억 8,000만원 (이상 시 가격 평가 1점 이상 손실)",
+            },
             "style_recommendations": [
-                "공공기관: 안정성, 준법성, 보안 인증 강조",
-                "대기업: ROI, 확장성, 글로벌 레퍼런스 강조",
-                "중견기업: 비용 효율성, 빠른 도입, 맞춤 지원 강조",
+                "공공기관: 안정성·준법성·보안 인증 강조 (ISO 27001, ISMS-P, K-ISMS 등)",
+                "능동 표현 + 정량 수치 우선 ('우수한' → '99.95% 검증된')",
+                "Win Theme 3개를 제안서 전체에 일관되게 반복",
+                "RFP 원문 어휘를 의도적으로 재인용하여 'RFP 이해도 높음' 인식",
+                "표/리스트 활용으로 평가위원의 가독성 향상",
             ],
             "differentiation_tips": [
-                "경쟁사 대비 차별화 포인트: AI/자동화 역량",
-                "유사 프로젝트 성공 사례를 구체적 수치와 함께 제시",
-                "고객 맞춤형 PoC(Proof of Concept) 제안으로 신뢰 확보",
+                "사전 영업 단계에서 핵심 기능 PoC 영상 전달 (수주의 50% 결정 요인)",
+                "유사 프로젝트 고객 인터뷰 영상 또는 인용 자료 첨부",
+                "제안서 첨부물에 자격증 사본·인증서 사본 일괄 제출",
+                "발주처 명을 매 섹션 첫 줄에 의도적으로 호명",
+                "경쟁사 대비 우위 비교 표를 가시적으로 배치",
+            ],
+            "risk_scenarios": [
+                {"scenario": "기술 평가 열위", "probability": "중", "impact": "치명", "mitigation": "PoC 자료 사전 전달 + 시연 영상 + 기술 백서 첨부"},
+                {"scenario": "최저가 경쟁사 출현", "probability": "상", "impact": "중", "mitigation": "TCO 3년 절감 자료 + Value for Money 표지 디자인"},
+                {"scenario": "핵심 인력 의구심", "probability": "중", "impact": "중", "mitigation": "이력서 + 자격증 사본 첨부 + 인터뷰 사전 안내"},
+            ],
+            "action_plan": [
+                {"action": "사전 영업 미팅 3회 추진", "owner": "영업 PL", "due": "제안 마감 D-21"},
+                {"action": "PoC 데모 환경 구축 및 영상 제작", "owner": "Tech Lead", "due": "D-14"},
+                {"action": "유사 프로젝트 고객 인용 자료 수집", "owner": "마케팅", "due": "D-10"},
+                {"action": "TCO 3년 시뮬레이션 자료 작성", "owner": "재무 PL", "due": "D-7"},
+                {"action": "제안서 내부 모의 평가 (Red Team Review)", "owner": "제안 PM", "due": "D-3"},
             ],
         }, ensure_ascii=False, indent=2)
     elif mock_type == "proposal":
         return json.dumps({
-            "title": "디지털 전환 플랫폼 구축 제안서",
+            "title": "디지털 전환 통합 플랫폼 구축 사업 제안서",
+            "executive_summary": "본 제안은 귀 기관의 레거시 환경 한계를 극복하기 위해, 클라우드 네이티브 기반 마이크로서비스 아키텍처와 데이터 통합 허브를 결합한 차세대 통합 플랫폼을 6개월 내 단계적으로 구축하는 방안입니다. 당사는 동일 영역에서 12건의 수행 실적, 평균 가용성 99.95%, 운영비 30% 절감의 정량 성과를 보유하고 있어, 본 사업을 안정적·효율적으로 완수할 최적 파트너임을 확신합니다.",
+            "win_themes": [
+                {"theme": "검증된 안정성", "message": "동일 규모 12건 무중단 운영 — 가용성 99.95% 달성"},
+                {"theme": "단계적 위험 최소화", "message": "Big Bang이 아닌 3단계 점진 전환으로 운영 중단 Zero"},
+                {"theme": "총소유비용(TCO) 절감", "message": "Auto-Scaling으로 인프라 비용 30%, 운영 인력 25% 절감"},
+            ],
+            "discriminators": [
+                {"point": "공공/금융 동일 분야 12건 수행", "proof": "최근 3년 누적 240억원 규모, 평균 만족도 4.7/5.0"},
+                {"point": "자체 보유 통합 모니터링 자산", "proof": "200+ 운영 지표 자동 수집/알람 (Datadog/Prometheus 연계)"},
+                {"point": "특급 PMP 인력 3명 풀타임 투입", "proof": "PMP/정보관리기술사 보유, 평균 경력 18년"},
+            ],
+            "evaluation_mapping": [
+                {"criteria": "기술 이해도", "weight": "30%", "section_ref": "3. 제안 솔루션", "key_message": "RFP 요구사항 7개 전건 충족, 아키텍처 도식 및 기술 선정 근거 명시"},
+                {"criteria": "수행 경험", "weight": "25%", "section_ref": "5. 수행 실적 및 투입 인력", "key_message": "동일 영역 12건 수행, 정량 성과 제시"},
+                {"criteria": "가격 적정성", "weight": "20%", "section_ref": "7. 투자 비용 개요", "key_message": "시장 평균 대비 8% 절감, Value for Money 강조"},
+                {"criteria": "프로젝트 관리", "weight": "15%", "section_ref": "4. 수행 방안", "key_message": "PMBOK 기반 WBS, 리스크 등록부, 변경관리 프로세스"},
+                {"criteria": "기술 지원", "weight": "10%", "section_ref": "6. 유지보수 및 기술 지원", "key_message": "무상 1년 + 유상 SLA 99.9%, 24/7 콜센터"},
+            ],
             "table_of_contents": [
-                "1. 제안 개요",
-                "  1.1 제안 배경 및 목적",
-                "  1.2 프로젝트 범위",
-                "2. 현황 분석",
-                "  2.1 고객 환경 분석",
-                "  2.2 개선 방향",
-                "3. 제안 솔루션",
-                "  3.1 시스템 아키텍처",
-                "  3.2 핵심 기능 상세",
-                "  3.3 기술 스택",
-                "4. 수행 방안",
-                "  4.1 프로젝트 추진 체계",
-                "  4.2 일정 계획",
-                "  4.3 품질 관리 방안",
-                "5. 수행 실적",
-                "  5.1 유사 프로젝트 레퍼런스",
-                "  5.2 투입 인력 현황",
-                "6. 유지보수 및 지원",
-                "7. 투자 비용",
+                "1. 제안 개요", "  1.1 제안 배경 및 목적", "  1.2 프로젝트 범위 및 기대효과", "  1.3 본 제안의 차별점",
+                "2. 현황 분석", "  2.1 고객 환경 분석 (AS-IS)", "  2.2 개선 방향 (TO-BE)", "  2.3 Gap 분석 및 핵심 과제",
+                "3. 제안 솔루션", "  3.1 전체 시스템 아키텍처", "  3.2 핵심 기능 상세", "  3.3 기술 스택 및 선정 근거", "  3.4 데이터 및 시스템 연계 방안",
+                "4. 수행 방안", "  4.1 프로젝트 추진 체계", "  4.2 단계별 일정 계획 (WBS)", "  4.3 품질 관리 방안", "  4.4 리스크 관리 방안", "  4.5 변경/형상/이슈 관리",
+                "5. 수행 실적 및 투입 인력", "  5.1 유사 프로젝트 레퍼런스", "  5.2 핵심 투입 인력 프로필",
+                "6. 유지보수 및 기술 지원", "  6.1 하자보수 범위 및 기간", "  6.2 SLA 및 기술 지원 체계",
+                "7. 투자 비용 개요", "  7.1 비용 구성", "  7.2 Value for Money",
             ],
             "sections": {
-                "1. 제안 개요": "본 제안서는 귀사의 디지털 전환을 위한 통합 플랫폼 구축 방안을 제시합니다. RFP에서 요구하신 핵심 요구사항을 분석하여, 안정적이고 확장 가능한 시스템 구축을 통해 업무 효율성 향상과 비용 절감을 실현하고자 합니다.",
-                "3. 제안 솔루션": "마이크로서비스 아키텍처 기반의 클라우드 네이티브 플랫폼을 제안합니다. Kubernetes 기반 컨테이너 오케스트레이션으로 자동 스케일링을 지원하며, API Gateway를 통한 서비스 통합으로 기존 ERP 시스템과의 원활한 연동을 보장합니다.",
-                "4. 수행 방안": "3단계 접근법(Phase 1: 기반 구축 2개월, Phase 2: 핵심 기능 개발 3개월, Phase 3: 통합 테스트 및 안정화 1개월)으로 총 6개월 내 안정적인 시스템 구축을 완료합니다.",
+                "1. 제안 개요": "1.1 제안 배경 및 목적\n귀 기관은 사용자 증가(연 15%) 및 외부 연계 시스템 확장으로 기존 모놀리식 환경의 확장성·운영 비용·장애 대응 한계가 누적되고 있습니다. 본 제안은 클라우드 네이티브 마이크로서비스 아키텍처로의 단계적 전환을 통해, 시스템 안정성(가용성 99.95%), 운영 효율(인력 25% 절감), 신규 서비스 출시 속도(평균 3개월 → 4주)를 동시에 확보하는 것을 목적으로 합니다.\n\n1.2 프로젝트 범위 및 기대효과\n총 6개월간 12개 핵심 업무 모듈을 Kubernetes 기반 컨테이너 환경으로 전환하며, API Gateway·메시지 큐·통합 모니터링 체계를 구축합니다. 기대효과로는 ① 인프라 운영비 30% 절감, ② 장애 복구 시간(MTTR) 60% 단축, ③ 신규 기능 배포 주기 12배 단축이 예상됩니다.\n\n1.3 본 제안의 차별점\n① 동일 영역 12건 수행 — 평균 만족도 4.7/5.0  ② 특급 인력 3명 풀타임 투입(PMP/기술사)  ③ 자체 보유 통합 모니터링 자산으로 Day 1부터 200+ 지표 실시간 가시화.",
+                "2. 현황 분석": "2.1 AS-IS — 현재 환경의 한계\n① 모놀리식 구조: 단일 배포 단위로 작은 변경에도 전체 빌드 30분+ 소요  ② Vertical Scaling 한계: 트래픽 피크 시 응답시간 5초+ 지연 발생  ③ 수동 운영: 장애 감지 평균 18분, 복구 평균 47분 (업계 평균 대비 2배)  ④ 사일로화된 데이터: 부서별 분산 DB로 통합 분석 불가\n\n2.2 TO-BE — 차세대 청사진\n• 마이크로서비스(Domain별 12개) + Kubernetes 자동 확장 → 트래픽 피크 시 응답시간 200ms 이내 유지\n• 통합 데이터 허브 + Event-Driven 연계 → 실시간 데이터 통합/분석\n• Observability 표준화(메트릭/로그/트레이스) → MTTR 60% 단축\n\n2.3 Gap 분석 및 핵심 과제\n우선순위 1) 핵심 거래 모듈 컨테이너화 + Blue/Green 배포  2) 데이터 통합 허브 구축 및 사일로 해소  3) 운영 자동화/모니터링 표준화. 본 사업은 위 3개 핵심 과제를 6개월 내 동시 해결합니다.",
+                "3. 제안 솔루션": "3.1 전체 아키텍처\n5계층 구조: ① 사용자 채널(Web/App)  ② API Gateway(인증/Rate Limit/라우팅)  ③ 마이크로서비스(12개 도메인, Spring Boot 3 / Node.js 20)  ④ 데이터 플랫폼(PostgreSQL HA, Redis 캐시, Kafka 메시지 버스)  ⑤ Observability(Prometheus/Grafana/Loki/Tempo + Datadog APM).\n\n3.2 핵심 기능 (성능 지표 포함)\n• 통합 사용자 인증/SSO — TPS 3,000 / 응답 < 50ms\n• 실시간 데이터 통합 — Kafka 50,000 msg/sec, 지연 < 200ms\n• 자동 스케일링 정책 — CPU 70% / 메모리 75% 임계 시 30초 내 확장\n• 통합 모니터링 대시보드 — 200+ 지표 실시간, SLO 자동 알람\n• 무중단 배포 — Blue/Green + Canary, 평균 배포 시간 8분\n• 데이터 백업/복구 — RPO 5분 / RTO 15분\n\n3.3 기술 스택 선정 근거\n| 분류 | 스택 | 선정 사유 |\n|---|---|---|\n| Container Orchestration | Kubernetes 1.30 | CNCF Graduated, 12건 수행 검증 |\n| API Gateway | Kong Gateway | 플러그인 생태계, HA 검증 |\n| Service Mesh | Istio | mTLS/Observability 통합 |\n| Message Broker | Kafka 3.7 | 50,000 msg/sec 처리 검증 |\n| Database | PostgreSQL 16 HA | 표준 호환, 비용 효율 |\n| Observability | Datadog + OpenTelemetry | APM/Log/Trace 통합 |\n\n3.4 데이터 및 연계\n• 기존 ERP/HR/CRM 시스템과 REST/SOAP/SFTP 연계 표준 채택  • 데이터 무결성 보장: Saga 패턴 + Outbox 패턴 적용  • 외부 연동 30종, 평균 응답 200ms 이내 SLA 설계.",
+                "4. 수행 방안": "4.1 추진 체계\n• 총괄 PM(특급, PMP) 1명 + Tech Lead(특급) 2명 + 도메인 개발자 8명 + QA 2명 + DevOps 2명, 총 15명 풀타임\n• 거버넌스: 주간 진척 회의(매주 수), 월간 운영위 보고, 분기 평가\n\n4.2 단계별 일정 (WBS 요약)\nPhase 1 (1~2개월) — 기반 구축: 인프라/K8s 구축, CI/CD 파이프라인, 첫 2개 서비스 마이그레이션. 산출물: 아키텍처설계서, 인프라 구축 완료보고서. 마일스톤: M1(K8s 클러스터 OK), M2(첫 서비스 Live)\nPhase 2 (3~5개월) — 핵심 개발: 나머지 10개 도메인 서비스 개발/마이그레이션, 데이터 허브 구축, 통합 테스트. 마일스톤: M3(8개 서비스 OK), M4(전 서비스 통합 OK)\nPhase 3 (6개월) — 안정화/이관: 부하/장애 테스트, 운영팀 인계, 무상 하자보수 시작. 마일스톤: M5(검수 완료)\n\n4.3 품질 관리\n• CMMI Level 3 기반 프로세스, 단위 테스트 커버리지 80%+ 강제\n• Static Analysis(SonarQube) + 보안 점검(OWASP Top 10) 자동화\n• 코드 리뷰 100%, 주간 품질 보고서\n\n4.4 리스크 관리 (Top 5)\n① ERP 연동 복잡도(High×High) → 사전 PoC 2주, 전문 파트너 합류\n② 인력 이탈(Medium×Medium) → 핵심 인력 인센티브, 백업 인력 2명 확보\n③ 일정 지연(Medium×High) → 버퍼 10% 확보, 주간 EVM 추적\n④ 데이터 마이그레이션 오류(Low×High) → Shadow Run 4주, Rollback 시나리오\n⑤ 운영 인계 미흡(Medium×Medium) → 인계 교육 40시간, 운영 매뉴얼 200P\n\n4.5 변경/형상/이슈 관리\nJira + Confluence 표준, 변경 요청은 CCB 승인 후 반영, Git Flow 표준 적용.",
+                "5. 수행 실적 및 투입 인력": "5.1 유사 프로젝트 레퍼런스 (최근 3년 12건 중 대표 3건)\n① A공사 통합관제시스템 (2024.03~2024.12, 38억원, PM/15명) — 가용성 99.97%, 운영비 32% 절감, 만족도 4.8/5.0\n② B금융 차세대 코어뱅킹 MSA 전환 (2023.06~2024.05, 65억원, 25명) — TPS 2,800→9,500, 장애시간 75% 감소\n③ C기관 데이터 통합 플랫폼 (2023.01~2023.11, 22억원, 12명) — 30개 시스템 연계, 처리 지연 80% 감소\n\n5.2 핵심 투입 인력 (총 15명 중 5명 발췌)\n| 역할 | 등급 | 경력 | 자격 | 대표 이력 |\n|---|---|---|---|---|\n| PM | 특급 | 22년 | PMP, 정보관리기술사 | A공사 등 동일 영역 PM 8건 |\n| Tech Lead 1 | 특급 | 18년 | 정보처리기술사, CKA | MSA 전환 5건 리드 |\n| Tech Lead 2 | 특급 | 16년 | AWS SA Pro | 클라우드 전환 7건 |\n| DBA | 고급 | 14년 | OCP, PostgreSQL Certified | HA 구축 12건 |\n| 보안 PL | 고급 | 12년 | CISSP, CISA | 금융권 보안 인증 다수 |",
+                "6. 유지보수 및 기술 지원": "6.1 하자보수\n• 무상 하자보수 12개월 (검수 완료일부터)\n• 범위: 인도된 모든 산출물의 버그 수정, 환경 변화 대응, 보안 패치\n• 응답 SLA: Critical 1시간 / High 4시간 / Medium 8 영업시간 / Low 3 영업일\n\n6.2 유상 SLA (선택, 연 단위 갱신)\n• 가용성 99.9% 보장 (월간 다운타임 43분 이내)\n• 24/7 콜센터 + 원격 지원, 분기별 정기 점검 4회 + 현장 출동 2회 (연)\n• 월간 KPI 리포트: 가용성/장애 건수/MTTR/티켓 처리율\n• 분기 운영 검토회 + 연 1회 기술 로드맵 협의\n\n6.3 추가 지원\n• 무상 교육 40시간 (운영팀/개발팀) + 매뉴얼 200P 인도\n• 핫라인 보안 사고 대응 1시간 이내 도착",
+                "7. 투자 비용 개요": "7.1 비용 구성 (총액 5억 2,000만원, VAT 별도)\n• 인건비 76% (3억 9,600만원) — 15명 × 평균 6개월\n• SW 라이선스/클라우드 10% (5,400만원) — AWS, Datadog, Kong\n• HW/인프라 8% (4,000만원) — 개발/스테이징 환경\n• 기타 경비 6% (3,000만원) — 출장, 교육, 문서화\n\n7.2 Value for Money\n• 시장 평균(6억 1,000만원) 대비 8% 절감\n• 도입 후 3년 누적 운영비 절감 기대치: 11.4억원 (인프라 30% + 인력 25% 절감 환산)\n• 신규 서비스 출시 속도 12배 향상에 따른 기회 비용 회수 추가",
             },
+            "references_summary": [
+                {"customer": "A공사", "project": "통합관제시스템 구축", "period": "2024.03~2024.12", "scale": "38억원 / 15명", "outcome": "가용성 99.97%, 운영비 32% 절감"},
+                {"customer": "B금융", "project": "코어뱅킹 MSA 전환", "period": "2023.06~2024.05", "scale": "65억원 / 25명", "outcome": "TPS 2,800→9,500, 장애시간 75% 감소"},
+                {"customer": "C기관", "project": "데이터 통합 플랫폼", "period": "2023.01~2023.11", "scale": "22억원 / 12명", "outcome": "30개 시스템 연계, 지연 80% 감소"},
+            ],
+            "key_personnel": [
+                {"role": "PM", "grade": "특급", "years": "22년", "certs": "PMP, 정보관리기술사", "highlight": "A공사 등 동일 영역 PM 8건"},
+                {"role": "Tech Lead", "grade": "특급", "years": "18년", "certs": "정보처리기술사, CKA", "highlight": "MSA 전환 5건 리드"},
+                {"role": "Cloud Architect", "grade": "특급", "years": "16년", "certs": "AWS SA Pro", "highlight": "클라우드 전환 7건"},
+                {"role": "DBA", "grade": "고급", "years": "14년", "certs": "OCP, PostgreSQL Certified", "highlight": "HA 구축 12건"},
+                {"role": "보안 PL", "grade": "고급", "years": "12년", "certs": "CISSP, CISA", "highlight": "금융권 보안 인증 다수"},
+            ],
+            "risk_register": [
+                {"risk": "ERP 연동 복잡도", "impact": "상", "likelihood": "상", "mitigation": "사전 PoC 2주, 전문 파트너 합류"},
+                {"risk": "핵심 인력 이탈", "impact": "중", "likelihood": "중", "mitigation": "인센티브 + 백업 인력 2명 확보"},
+                {"risk": "일정 지연", "impact": "상", "likelihood": "중", "mitigation": "버퍼 10%, 주간 EVM 추적"},
+                {"risk": "데이터 마이그레이션 오류", "impact": "상", "likelihood": "하", "mitigation": "Shadow Run 4주, Rollback 시나리오"},
+                {"risk": "운영 인계 미흡", "impact": "중", "likelihood": "중", "mitigation": "인계 교육 40시간, 매뉴얼 200P"},
+            ],
         }, ensure_ascii=False, indent=2)
     elif mock_type == "review":
         return json.dumps({
             "overall_score": 78,
+            "weighted_score": 76.8,
             "grade": "B+",
+            "win_probability": "65%",
+            "summary": "RFP 요구사항 7건 중 6건 충족·구체적 일정/인력 강점. 단, ERP 연동·DR 방안 누락 + 차별화 부족이 주요 약점.",
             "review_items": [
-                {"category": "요구사항 충족", "score": 85, "status": "양호", "comment": "핵심 요구사항 7개 중 6개 충족, REQ-006 ERP 연동 상세 방안 보완 필요"},
-                {"category": "논리 일관성", "score": 80, "status": "양호", "comment": "전체적으로 일관적이나, 일정 계획과 투입 인력 간 불일치 발견"},
-                {"category": "차별화 요소", "score": 65, "status": "보완필요", "comment": "경쟁사 대비 뚜렷한 차별점 부족, AI/자동화 역량 강조 권장"},
-                {"category": "가격 경쟁력", "score": 75, "status": "보통", "comment": "시장 평균 대비 적정 수준이나, 가치 기반 설명 보강 필요"},
-                {"category": "문서 완성도", "score": 82, "status": "양호", "comment": "구성 체계적이나, 시각 자료(다이어그램) 추가 권장"},
+                {"category": "RFP 요구사항 충족도", "score": 85, "max": 100, "status": "양호", "comment": "7건 중 6건 충족, REQ-006 ERP 연동 상세 방안 누락"},
+                {"category": "기술적 타당성", "score": 80, "max": 100, "status": "양호", "comment": "MSA·Kubernetes 선택 적절, 보안 통제 항목 일부 누락"},
+                {"category": "수행 방안의 명확성", "score": 75, "max": 100, "status": "보통", "comment": "WBS 상세하나 크리티컬 패스 식별 부재"},
+                {"category": "차별화 요소", "score": 65, "max": 100, "status": "보완필요", "comment": "경쟁사 대비 차별점 산만, Win Theme 3개 부각 필요"},
+                {"category": "수행 실적/레퍼런스", "score": 82, "max": 100, "status": "양호", "comment": "정량 성과 제시 우수, 최근 3년 12건"},
+                {"category": "투입 인력 적정성", "score": 78, "max": 100, "status": "양호", "comment": "핵심 인력 보유, 백업 인력 명시 보강 필요"},
+                {"category": "가격 경쟁력", "score": 75, "max": 100, "status": "보통", "comment": "시장 대비 8% 절감, Value for Money 설명 추가 권장"},
+                {"category": "유지보수/지원 체계", "score": 80, "max": 100, "status": "양호", "comment": "SLA 위반 페널티 명시 필요"},
+                {"category": "문서 완성도", "score": 82, "max": 100, "status": "양호", "comment": "구성 체계적, 다이어그램 보강 권장"},
             ],
-            "missing_requirements": ["ERP 연동 상세 인터페이스 명세", "재해복구(DR) 방안", "데이터 마이그레이션 계획"],
-            "logic_issues": ["3.2절 '6개월 완료' vs 4.2절 '8개월 일정표' 불일치", "투입 인력 10명 제안 vs 유사 프로젝트 15명 투입 사례 괴리"],
-            "improvement_suggestions": ["ERP 연동 아키텍처 다이어그램 추가", "Phase별 마일스톤과 산출물 명확화", "경쟁사 대비 기술 우위 표 작성", "고객 인터뷰 기반 Pain Point 해결 사례 추가"],
+            "evaluator_perspectives": [
+                {"persona": "기술 평가위원", "score": 78, "key_concern": "기술 스택 대안 비교표 부재", "key_strength": "아키텍처 5계층 구조 도식이 구체적"},
+                {"persona": "사업 평가위원", "score": 74, "key_concern": "리스크 대응 비용 명시 부족, 변경관리 비용 누락 가능", "key_strength": "Phase별 일정 현실적"},
+                {"persona": "운영 평가위원", "score": 81, "key_concern": "SLA 위반 시 페널티 조항 미명시", "key_strength": "24/7 콜센터 + 핫라인 1시간 대응"},
+            ],
+            "requirements_traceability": [
+                {"req_id": "REQ-001", "title": "사용자 인증/SSO", "status": "충족", "section_ref": "3.2", "evidence": "TPS 3,000 / <50ms 성능 지표 명시"},
+                {"req_id": "REQ-002", "title": "실시간 대시보드", "status": "부분충족", "section_ref": "3.2", "gap": "동시 사용자 1,000명 처리 검증 자료 미제시"},
+                {"req_id": "REQ-003", "title": "동시 사용자 1,000명", "status": "부분충족", "section_ref": "3.1", "gap": "수평 확장 정책은 명시되나 부하 테스트 결과 누락"},
+                {"req_id": "REQ-004", "title": "개인정보 암호화", "status": "충족", "section_ref": "3.2/3.3", "evidence": "전송/저장 모두 AES-256 명시"},
+                {"req_id": "REQ-005", "title": "반응형 UI", "status": "충족", "section_ref": "3.2", "evidence": "Tailwind/CSS Grid 기반 명시"},
+                {"req_id": "REQ-006", "title": "ERP 연동", "status": "누락", "section_ref": "-", "gap": "ERP 인터페이스 명세·전문 정의 누락 — 평가위원 1차 감점 가능"},
+                {"req_id": "REQ-007", "title": "운영 매뉴얼/교육", "status": "충족", "section_ref": "6.3", "evidence": "40시간 교육 + 200P 매뉴얼"},
+            ],
+            "section_analysis": [
+                {"section": "1. 제안 개요", "strengths": ["기대효과 정량 수치 제시", "차별점 3가지 명확"], "weaknesses": ["발주처 명시적 호명/Pain Point 직접 인용 부족"]},
+                {"section": "3. 제안 솔루션", "strengths": ["5계층 아키텍처 도식", "기술 스택 선정 사유 표 형식"], "weaknesses": ["대안 비교 표 없음", "보안 통제(접근통제/감사로그) 항목 누락"]},
+                {"section": "4. 수행 방안", "strengths": ["Phase별 WBS·산출물 상세", "리스크 등록부 5건"], "weaknesses": ["크리티컬 패스 식별 부재", "변경관리 비용 미산정"]},
+                {"section": "5. 수행 실적 및 투입 인력", "strengths": ["정량 성과 제시", "핵심 인력 자격증 명시"], "weaknesses": ["백업 인력 가용성 명시 부족"]},
+                {"section": "7. 투자 비용 개요", "strengths": ["시장 평균 비교"], "weaknesses": ["TCO 3년 절감 계산 산출 근거 미흡"]},
+            ],
+            "missing_requirements": [
+                {"req_id": "REQ-006", "description": "ERP 연동 상세 인터페이스 명세 (전문/필드/주기)", "severity": "치명적"},
+                {"req_id": "REQ-009", "description": "재해복구(DR) 방안 누락 - RPO/RTO/이중화 구조", "severity": "높음"},
+                {"req_id": "REQ-011", "description": "데이터 마이그레이션 절차 및 검증 계획 미정의", "severity": "높음"},
+            ],
+            "logic_issues": [
+                {"issue": "3.2절 '6개월 완료' vs 4.2절 '6개월 일정 + 안정화'  마감 정의 모호", "where": "3.2 ↔ 4.2", "fix": "검수일 vs 안정화 종료일 명확 구분"},
+                {"issue": "투입 인력 15명 vs 유사 프로젝트 25명 사례 괴리", "where": "4.1 ↔ 5.1", "fix": "축소 운영 근거(자동화 도구 활용) 또는 외부 파트너 합류 명시"},
+            ],
+            "improvement_suggestions": [
+                {"priority": "P0", "effort": "1일", "suggestion": "ERP 연동 아키텍처 다이어그램 + 인터페이스 표 추가", "impact": "치명적 누락 보완 → 점수 8점 상승 예상"},
+                {"priority": "P0", "effort": "0.5일", "suggestion": "DR 방안 절 추가 (RPO 5분/RTO 15분/이중화 구조)", "impact": "리스크 평가 가산 가능"},
+                {"priority": "P1", "effort": "1일", "suggestion": "Phase별 마일스톤·산출물·검수기준 표로 명확화", "impact": "프로젝트 관리 평가 5점 상승"},
+                {"priority": "P1", "effort": "0.5일", "suggestion": "경쟁사 대비 기술 우위 비교 표 작성", "impact": "차별화 평가 강화"},
+                {"priority": "P2", "effort": "1일", "suggestion": "고객 인터뷰 기반 Pain Point 해결 사례 추가", "impact": "공감 가능성 상승"},
+            ],
+            "wording_improvements": [
+                {"before": "안정적인 시스템을 제공합니다", "after": "동일 규모 12건 무중단 운영 — 가용성 99.95% 검증된 시스템을 제공합니다", "why": "정량 수치로 신뢰도 강화"},
+                {"before": "신속한 대응이 가능합니다", "after": "Critical 1시간 / High 4시간 SLA를 24/7 보장합니다", "why": "구체적 SLA 명시"},
+                {"before": "우수한 기술력을 보유하고 있습니다", "after": "정보관리기술사 3명, PMP 5명, 클라우드 자격 12명 보유", "why": "자격증 수치로 객관화"},
+            ],
+            "competitor_gaps": [
+                {"area": "가격", "our_position": "중상위(시장 평균 -8%)", "risk": "최저가 입찰사 대비 가격 평가 1~2점 열위 가능", "counter": "TCO 3년 11.4억 절감 효과로 Value for Money 강조"},
+                {"area": "수행 실적", "our_position": "우위(12건)", "risk": "-", "counter": "정량 성과 표 전면 배치"},
+                {"area": "기술", "our_position": "동등", "risk": "차별점 부족", "counter": "자체 모니터링 자산·통합 운영 노하우 부각"},
+            ],
         }, ensure_ascii=False, indent=2)
     elif mock_type == "strategy":
         return json.dumps({
@@ -234,9 +420,22 @@ def generate_mock_response(mock_type: str) -> str:
         }, ensure_ascii=False, indent=2)
     elif mock_type == "estimate":
         return json.dumps({
-            "project_name": "클라우드 플랫폼 구축",
-            "total_cost": "5억 2,000만원", "total_cost_number": 520000000,
-            "duration_months": 6, "summary": "RFP 요구사항 기반 6개월 프로젝트 견적입니다.",
+            "project_name": "디지털 전환 통합 플랫폼 구축",
+            "total_cost": "5억 6,160만원 (VAT 별도)",
+            "total_cost_number": 561600000,
+            "total_cost_with_vat": "6억 1,776만원 (VAT 포함)",
+            "total_cost_with_vat_number": 617760000,
+            "duration_months": 6,
+            "summary": "KOSA 2024년 SW기술자 노임단가 기준 인건비 산정 + AWS 종량제 클라우드 인프라 임대 기준 6개월 견적. 시장 평균 대비 8% 절감 포지션.",
+            "labor_rate_basis": {
+                "source": "KOSA(한국소프트웨어산업협회) SW기술자 평균임금 2024년 공표",
+                "rates": [
+                    {"grade": "특급", "annual": "9,400만원/년", "monthly": "약 450만원/월 (실투입 기준)"},
+                    {"grade": "고급", "annual": "8,000만원/년", "monthly": "약 380만원/월"},
+                    {"grade": "중급", "annual": "6,500만원/년", "monthly": "약 310만원/월"},
+                    {"grade": "초급", "annual": "5,000만원/년", "monthly": "약 240만원/월"},
+                ],
+            },
             "categories": [
                 {"name": "인건비", "subtotal": "3억 9,600만원", "subtotal_number": 396000000, "ratio": "76%", "items": [
                     {"role": "PM", "grade": "특급", "count": 1, "months": 6, "unit_cost": "450만원", "cost": "2,700만원", "reason": "프로젝트 총괄 관리"},
@@ -258,12 +457,49 @@ def generate_mock_response(mock_type: str) -> str:
                     {"item": "교육/인수인계", "cost": "1,000만원", "reason": "운영팀 교육 및 매뉴얼 작성"},
                 ]},
             ],
-            "risks": [
-                {"risk": "요구사항 변경", "impact": "10~15% 추가 비용", "mitigation": "변경관리 프로세스 수립"},
-                {"risk": "인력 수급 지연", "impact": "1~2개월 일정 지연", "mitigation": "핵심 인력 사전 확보"},
+            "phase_breakdown": [
+                {"phase": "Phase 1: 기반 구축", "months": "1~2", "cost": "1억 4,000만원", "cost_number": 140000000, "deliverables": "아키텍처 설계서, 인프라 구축 완료보고서, 첫 2개 서비스 마이그레이션"},
+                {"phase": "Phase 2: 핵심 개발", "months": "3~5", "cost": "2억 8,000만원", "cost_number": 280000000, "deliverables": "12개 서비스 개발/마이그레이션, 데이터 허브, 통합 테스트"},
+                {"phase": "Phase 3: 안정화/이관", "months": "6", "cost": "1억 4,160만원", "cost_number": 141600000, "deliverables": "부하/장애 테스트, 운영 인계서, 매뉴얼"},
             ],
-            "assumptions": ["SW기술자 노임단가 2024년 기준 적용", "클라우드 인프라 종량제 기준", "6개월 고정 기간 산정"],
-            "notes": "실제 계약 시 요구사항 확정 후 ±10% 조정 가능",
+            "cost_structure": {
+                "direct_cost": "4억 9,000만원",
+                "direct_cost_number": 490000000,
+                "general_admin": {"label": "일반관리비 (8%)", "amount": "3,920만원", "amount_number": 39200000},
+                "profit": {"label": "이윤 (10%)", "amount": "5,292만원", "amount_number": 52920000},
+                "contingency": {"label": "예비비 (5%)", "amount": "2,948만원", "amount_number": 29480000},
+                "vat": {"label": "부가세 (10%)", "amount": "5,616만원", "amount_number": 56160000},
+            },
+            "pricing_options": [
+                {"option": "Base (권장)", "total": "6억 1,776만원", "rationale": "표준 노임단가 + 정상 마진 10% + 시장 평균 -8%", "win_probability": "60%"},
+                {"option": "Aggressive (저가)", "total": "5억 4,800만원", "rationale": "마진 5%, 예비비 축소. 레퍼런스 확보 우선 시", "win_probability": "75%"},
+                {"option": "Premium (고가)", "total": "6억 8,400만원", "rationale": "특급 인력 풀투입 + 강화된 SLA(99.95%). 안정성 평가 가중치 높을 때", "win_probability": "45%"},
+            ],
+            "payment_milestones": [
+                {"milestone": "착수금", "ratio": "20%", "amount": "1억 2,355만원", "trigger": "계약 체결 후 7일 이내"},
+                {"milestone": "중간 검수", "ratio": "40%", "amount": "2억 4,710만원", "trigger": "Phase 2 완료 + 중간 보고서 승인"},
+                {"milestone": "최종 검수", "ratio": "40%", "amount": "2억 4,710만원", "trigger": "최종 검수 합격 + 인계 완료"},
+            ],
+            "market_comparison": {
+                "market_average": "6억 1,000만원",
+                "market_average_number": 610000000,
+                "our_total": "5억 6,160만원",
+                "delta_pct": "-8%",
+                "interpretation": "시장 평균 대비 8% 절감 — 가격 평가 1~2점 가산 기대. TCO 3년 11.4억 절감 효과 추가 강조 권장.",
+            },
+            "risks": [
+                {"risk": "요구사항 변경 (Scope Creep)", "impact": "직접비 10~15% 증가 가능", "mitigation": "변경관리 프로세스 + CCB 승인 절차"},
+                {"risk": "특급 인력 수급 지연", "impact": "1~2개월 일정 지연", "mitigation": "사전 인력 확정 + 백업 인력 2명 확보"},
+                {"risk": "클라우드 환율 변동", "impact": "인프라 비용 5~8% 변동", "mitigation": "환율 헤지 또는 환차 보존 조항"},
+            ],
+            "assumptions": [
+                "노임단가는 KOSA 2024년 공표 기준 적용",
+                "클라우드 서비스는 종량제, 1년 약정 기준",
+                "6개월 고정 기간 산정 (연장 시 추가 협의)",
+                "출장/숙박 등 실비는 별도 정산",
+                "부가세 별도, 결제는 마일스톤 기준",
+            ],
+            "notes": "본 견적은 RFP 기반 추정치이며 요구사항 확정 후 ±10% 조정 가능. 결제는 마일스톤 기준이며 사전 조정 가능합니다.",
         }, ensure_ascii=False, indent=2)
     return "분석이 완료되었습니다."
 
@@ -292,17 +528,81 @@ async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
+# ─── Auth API ───
+
+@app.post("/api/auth/register")
+async def auth_register(request: Request, username: str = Form(...), password: str = Form(...)):
+    username = username.strip()
+    if len(username) < 2 or len(password) < 4:
+        raise HTTPException(400, "아이디는 2자 이상, 비밀번호는 4자 이상이어야 합니다.")
+    if db.get_user_by_username(username):
+        raise HTTPException(409, "이미 존재하는 아이디입니다.")
+    uid = db.create_user(username, password, is_admin=False)
+    request.session["uid"] = uid
+    user = db.get_user_by_id(uid)
+    log_activity("회원가입", username)
+    return JSONResponse({"user": user})
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request, username: str = Form(...), password: str = Form(...)):
+    user = db.verify_user(username.strip(), password)
+    if not user:
+        raise HTTPException(401, "아이디 또는 비밀번호가 올바르지 않습니다.")
+    request.session["uid"] = user["id"]
+    log_activity("로그인", user["username"])
+    return JSONResponse({"user": user})
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    request.session.clear()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = current_user(request)
+    return JSONResponse({"user": user})
+
+
+# ─── Admin API ───
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request):
+    require_admin(request)
+    return JSONResponse({"users": db.list_users()})
+
+
+@app.post("/api/admin/delete-user")
+async def admin_delete_user(request: Request, user_id: int = Form(...)):
+    admin = require_admin(request)
+    if user_id == admin["id"]:
+        raise HTTPException(400, "본인 계정은 삭제할 수 없습니다.")
+    ok = db.delete_user(user_id)
+    if not ok:
+        raise HTTPException(400, "삭제할 수 없는 사용자입니다.")
+    log_activity("사용자 삭제", f"user_id={user_id}")
+    return JSONResponse({"ok": True})
+
+
 # ─── Dashboard API ───
 
 @app.get("/api/dashboard")
-async def dashboard():
-    rfps = db.list_rfps()
+async def dashboard(request: Request):
+    user = current_user(request)
+    if not user:
+        return JSONResponse({"rfp_count": 0, "proposal_count": 0, "knowledge_count": 0, "pipeline_count": 0, "recent_rfps": [], "activity_log": [], "pipeline_status": {}})
+    owner_id = None if user.get("is_admin") else user["id"]
+    rfps = db.list_rfps(owner_id)
     pipelines = db.list_pipelines()
+    visible_ids = {r["id"] for r in rfps}
+    scoped_pipelines = {k: v for k, v in pipelines.items() if owner_id is None or k in visible_ids}
     return JSONResponse({
         "rfp_count": len(rfps),
         "proposal_count": db.count_proposals(),
         "knowledge_count": db.count_knowledge(),
-        "pipeline_count": db.count_pipelines(),
+        "pipeline_count": len(scoped_pipelines),
         "recent_rfps": [
             {"id": v["id"], "filename": v["filename"], "text_length": v["text_length"]}
             for v in rfps[:5]
@@ -313,35 +613,52 @@ async def dashboard():
                 "steps": list(data.get("completed_steps", {}).keys()),
                 "total": len(data.get("completed_steps", {})),
             }
-            for rfp_id, data in pipelines.items()
+            for rfp_id, data in scoped_pipelines.items()
         },
     })
 
 
 # ─── Upload ───
 
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))  # 50MB
+
+
+def _safe_filename(name: str) -> str:
+    name = Path(name).name  # strip any path components
+    name = re.sub(r"[^A-Za-z0-9._\-가-힣 ]", "_", name)
+    return name[:200] or "upload.pdf"
+
+
 @app.post("/api/upload-rfp")
-async def upload_rfp(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
+async def upload_rfp(request: Request, file: UploadFile = File(...)):
+    user = require_user(request)
+    safe_name = _safe_filename(file.filename or "")
+    if not safe_name.lower().endswith(".pdf"):
         raise HTTPException(400, "PDF 파일만 업로드 가능합니다.")
 
-    rfp_id = str(uuid.uuid4())[:8]
-    filepath = UPLOAD_DIR / f"{rfp_id}_{file.filename}"
     content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"파일 크기가 너무 큽니다. (최대 {MAX_UPLOAD_BYTES//(1024*1024)}MB)")
+    if not content.startswith(b"%PDF-"):
+        raise HTTPException(400, "유효한 PDF 파일이 아닙니다.")
+
+    rfp_id = str(uuid.uuid4())[:8]
+    filepath = UPLOAD_DIR / f"{rfp_id}_{safe_name}"
     with open(filepath, "wb") as f:
         f.write(content)
 
     text = extract_pdf_text(str(filepath))
-    db.insert_rfp(rfp_id, file.filename, str(filepath), len(text), datetime.now().isoformat())
+    db.insert_rfp(rfp_id, safe_name, str(filepath), len(text), datetime.now().isoformat(), owner_id=user["id"])
     db.upsert_pipeline(rfp_id, {}, {})
-    log_activity("RFP 업로드", f"{file.filename} ({len(text):,}자)")
-    return {"rfp_id": rfp_id, "filename": file.filename, "text_length": len(text), "preview": text[:500]}
+    log_activity("RFP 업로드", f"{safe_name} ({len(text):,}자)")
+    return {"rfp_id": rfp_id, "filename": safe_name, "text_length": len(text), "preview": text[:500]}
 
 
 # ─── 1. RFP 자동 구조화 ───
 
 @app.post("/api/analyze-rfp")
-async def analyze_rfp(rfp_id: str = Form(...)):
+async def analyze_rfp(request: Request, rfp_id: str = Form(...)):
+    check_rfp_access(request, rfp_id)
     rfp = db.get_rfp_meta(rfp_id)
     if not rfp:
         raise HTTPException(404, "RFP를 찾을 수 없습니다.")
@@ -371,18 +688,95 @@ RFP 원문에 실제로 기재된 내용만 추출하세요. 원문에 없는 �
 
 @app.post("/api/winning-pattern")
 async def winning_pattern(
+    request: Request,
     rfp_id: str = Form(None),
     industry: str = Form("IT"),
     customer_type: str = Form("대기업"),
 ):
+    require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
     rfp_text = ""
     if rfp_id and db.rfp_exists(rfp_id):
         meta = db.get_rfp_meta(rfp_id)
         rfp_text = extract_pdf_text(meta["filepath"])[:4000] if meta and Path(meta["filepath"]).exists() else ""
 
-    system = """당신은 제안서 수주 전략 전문가입니다.
-고객 유형과 산업 분야를 고려하여 Winning Proposal 패턴을 반드시 아래 JSON 형식으로만 반환하세요. 마크다운 코드블록 없이 순수 JSON만 출력하세요:
-{"industry_analysis":"산업분석","winning_patterns":[{"pattern":"패턴명","description":"설명","confidence":"높음/중간/낮음"}],"style_recommendations":["추천1"],"differentiation_tips":["전략1"]}"""
+    system = """당신은 한국 IT 제안서 수주 전략 전문가(Shipley/APMP 인증 보유)입니다.
+고객/산업/RFP를 분석하여 **실제 수주 전략 워크북 수준**의 패턴 분석을 산출하세요.
+
+## 분석 표준
+1. **산업/고객 특성 정량 분석**: 평가기준 가중치 분포(공공/금융/대기업/중견), 평균 수주가격 포지션, 의사결정자 구성, 평가 위원 페르소나
+2. **Winning Patterns**: 해당 산업/고객에서 통계적으로 자주 성공한 패턴 5~7개 — 각 패턴의 신뢰도(높음/중간/낮음)와 적용 사례
+3. **Win Themes**: 본 RFP에서 가장 효과적일 3~5개 핵심 메시지 — 발주처 호명 + 핵심 가치 + 차별 메시지
+4. **Discriminators**: 경쟁사 대비 당사만의 차별점 후보 3~5개 — 각 차별점의 Proof Point(수치/사례/인증) 필수
+5. **Proof Points**: 사용 가능한 정량 근거(수치/레퍼런스/인증) 5개 이상
+6. **Ghost Team (경쟁사 분석)**: 예상 경쟁사 3개 — 강점/약점/예상 제안 포지션
+7. **Evaluator Personas**: 평가위원 3명 가상 — 역할/관심사/예상 질문/대응 메시지
+8. **Price-to-Win**: 산업 평균 가격대 + 권장 입찰 포지션 + 가격 평가 가중치
+9. **Risk Scenarios**: 수주 실패 시나리오 3개 + 사전 대응
+
+## 출력 JSON 스키마 (마크다운 코드블록 금지, 순수 JSON만)
+{
+  "industry_analysis": "산업 분석 200자 — 시장 트렌드, 발주 패턴, 주요 이슈",
+  "customer_profile": {
+    "type": "공공기관/대기업/금융권/중견기업 중 하나",
+    "decision_factors": ["1순위 의사결정 요인", "2순위", "3순위"],
+    "evaluation_weight_typical": {"기술": "30%", "수행경험": "25%", "가격": "20%", "프로젝트관리": "15%", "기술지원": "10%"},
+    "buying_signals": ["수주 가능성을 높이는 발주 신호 (예: 사전 영업 미팅 빈도)"],
+    "common_objections": ["흔한 반대 의견 (예: 비용 부담)"]
+  },
+  "winning_patterns": [
+    {"pattern": "패턴명 (예: 검증된 안정성 강조)", "description": "어떻게 작동하는지", "confidence": "높음/중간/낮음", "example": "이 패턴이 통한 실제 사례 한 줄"}
+  ],
+  "win_themes": [
+    {"theme": "핵심 메시지 1 (예: '검증된 안정성, 측정된 가치')", "supporting_message": "이 테마를 뒷받침할 한 줄", "evidence_required": "필요한 증거 (수치/사례)"}
+  ],
+  "discriminators": [
+    {"discriminator": "당사만의 차별점", "proof_point": "이를 입증하는 수치/사례/인증", "competitor_gap": "경쟁사 대비 우위 정도"}
+  ],
+  "proof_points": [
+    {"category": "수행 실적", "claim": "동일 영역 12건 수행", "evidence": "최근 3년 누적 240억원 / 평균 만족도 4.7"},
+    {"category": "기술 역량", "claim": "정보관리기술사 보유 3명", "evidence": "사내 인력 명부 검증"},
+    {"category": "고객 만족", "claim": "5년 연속 NPS 90+", "evidence": "외부 컨설팅 조사 결과"}
+  ],
+  "ghost_team": [
+    {"competitor": "경쟁사 A (예상)", "strengths": ["강점 1", "강점 2"], "weaknesses": ["약점 1"], "likely_positioning": "예상 제안 포지션 (예: 최저가 + 신속 납기)", "counter_strategy": "당사 대응 전략"},
+    {"competitor": "경쟁사 B (예상)", "strengths": [], "weaknesses": [], "likely_positioning": "", "counter_strategy": ""},
+    {"competitor": "경쟁사 C (예상)", "strengths": [], "weaknesses": [], "likely_positioning": "", "counter_strategy": ""}
+  ],
+  "evaluator_personas": [
+    {"role": "기술 평가위원", "background": "예: 정보화책임관/CIO", "key_concerns": ["기술 적합성", "안정성"], "expected_questions": ["예상 질문 1", "예상 질문 2"], "key_message_to_deliver": "전달해야 할 핵심 메시지"},
+    {"role": "사업 평가위원", "background": "구매/계약 담당자", "key_concerns": ["가격", "리스크"], "expected_questions": [], "key_message_to_deliver": ""},
+    {"role": "사용자 대표", "background": "현업 부서장", "key_concerns": ["편의성", "운영 부담"], "expected_questions": [], "key_message_to_deliver": ""}
+  ],
+  "price_to_win": {
+    "market_average_range": "예상 시장 평균 가격대 (예: 5억~7억원)",
+    "recommended_position": "시장 평균 -8% 또는 평균가 권장",
+    "rationale": "왜 이 포지션인지",
+    "price_weight": "RFP 가격 평가 가중치",
+    "low_price_threshold": "최저가 입찰 예상 금액",
+    "high_price_threshold": "고가 입찰 예상 금액"
+  },
+  "style_recommendations": [
+    "고객 유형별 작성 톤 추천 1 (예: 공공기관 - 안정성/준법성/보안 인증 강조)",
+    "주요 표현 가이드 (수동태 지양, 정량 수치 우선 등)"
+  ],
+  "differentiation_tips": [
+    "구체적 차별화 액션 1",
+    "PoC 제안으로 기술 입증",
+    "고객 인터뷰 기반 Pain Point 자료 첨부"
+  ],
+  "risk_scenarios": [
+    {"scenario": "기술 평가 열위 시나리오", "probability": "중", "impact": "치명", "mitigation": "PoC 자료 사전 전달 + 시연 영상"},
+    {"scenario": "최저가 경쟁 시나리오", "probability": "상", "impact": "중", "mitigation": "TCO 절감 자료로 Value for Money 강조"},
+    {"scenario": "수행 인력 의구심 시나리오", "probability": "중", "impact": "중", "mitigation": "핵심 인력 이력서 + 자격증 사본 첨부"}
+  ],
+  "action_plan": [
+    {"action": "사전 영업 미팅 추진", "owner": "영업 PL", "due": "제안 마감 D-21"},
+    {"action": "PoC 데모 환경 구축", "owner": "Tech Lead", "due": "D-14"},
+    {"action": "유사 프로젝트 인터뷰 영상 제작", "owner": "마케팅", "due": "D-7"}
+  ]
+}"""
 
     user_msg = f"산업: {industry}\n고객 유형: {customer_type}"
     if rfp_text:
@@ -400,38 +794,78 @@ async def winning_pattern(
 
 @app.post("/api/generate-proposal")
 async def generate_proposal(
+    request: Request,
     rfp_id: str = Form(None),
     company_info: str = Form(""),
     references: str = Form(""),
 ):
+    require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
     rfp_text = ""
     if rfp_id and db.rfp_exists(rfp_id):
         meta = db.get_rfp_meta(rfp_id)
         rfp_text = extract_pdf_text(meta["filepath"])[:6000] if meta and Path(meta["filepath"]).exists() else ""
 
-    system = """당신은 20년 경력의 제안서 작성 전문 컨설턴트입니다.
-RFP 요구사항, 회사 정보, 레퍼런스를 결합하여 **바로 제출 가능한 수준**의 제안서 초안을 작성하세요.
+    system = """당신은 공공/대기업 IT 프로젝트 수주 경력 20년차 제안 PM 겸 컨설턴트입니다.
+RFP 원문, 회사 정보, 레퍼런스를 분석하여 **실제 평가위원이 평가표로 채점 가능한 수준의 제안서 초안**을 작성하세요.
 
-## 작성 원칙
-1. 각 섹션은 최소 200자 이상, 구체적이고 설득력 있는 내용으로 작성
-2. RFP의 평가 기준에 직접 대응하는 내용을 포함
-3. 정량적 수치(기간, 인원, 비용절감률 등)를 적극 활용
-4. 고객의 Pain Point를 정확히 짚고 해결 방안을 제시
-5. 한국어 비즈니스 공식 문체 사용 (존칭, 경어체)
-6. 차별화 포인트를 각 섹션에 자연스럽게 녹여 서술
+## 핵심 작성 원칙
+1. **각 메인 섹션 최소 600자 이상**. 모호한 일반론 금지. 구체적 기술명/모델명/수치/일정/금액을 명시
+2. **RFP 평가기준에 1:1 매핑**: 각 평가항목별로 어떤 섹션이 어떻게 대응하는지 명확히 서술
+3. **정량 수치를 풍부하게**: 처리량(TPS), 응답시간(ms), 가용성(%), 비용절감률(%), 일정(개월/주), 인원(M/M), 만족도(점) 등을 적극 활용
+4. **고객 Pain Point → 솔루션 → 효과 → 증거** 4단 구조로 서술
+5. **차별화 포인트(Discriminators)** 3개 이상을 각 섹션에 자연스럽게 녹임
+6. **Proof Points**: "유사 프로젝트 OO에서 △△% 개선" 형태의 구체적 사례 인용
+7. **한국어 비즈니스 공식 문체** (존칭, 경어체), 표·리스트 형식의 구조화된 서술 권장 (예: "1) ... 2) ... 3) ...")
+8. **반드시 RFP 원문 어휘를 의도적으로 재인용**하여 평가위원이 "RFP 이해도 높음"으로 인지하게 작성
 
-## 필수 포함 섹션
-- 제안 개요: 배경, 목적, 기대효과를 명확히 서술
-- 현황 분석: 고객 환경 분석, AS-IS/TO-BE 비교
-- 제안 솔루션: 시스템 아키텍처, 핵심 기능 상세, 기술 스택과 선정 근거
-- 수행 방안: 추진 체계, WBS 기반 일정 계획, 단계별 산출물, 품질/리스크 관리
-- 수행 실적: 유사 프로젝트 레퍼런스 (정량적 성과 포함)
-- 투입 인력: 핵심 인력 역할과 경력 요약
-- 유지보수: 하자보수, SLA, 기술지원 체계
-- 투자 비용: 비용 구조 개요
+## 섹션별 작성 가이드 (모두 600자 이상)
+- **1. 제안 개요**: 제안 배경(고객 환경/이슈) + 제안 목적 + 본 제안의 차별점 3가지(Discriminators) + 정량적 기대효과(예: 운영비 30% 절감)
+- **2. 현황 분석**: AS-IS(고객의 현재 시스템·프로세스 한계 4가지 이상) → TO-BE(제안 시스템 도입 후 모습) → Gap 분석 → 우선 해결 과제 정의
+- **3. 제안 솔루션**: 전체 아키텍처(레이어/컴포넌트 명시), 핵심 기능 5~7개 상세(기능명/입력/처리/출력/성능지표), 기술 스택 표(스택/버전/선정사유/대안 비교), 데이터/통합 흐름
+- **4. 수행 방안**: 추진 체계도(역할/책임/소통구조), WBS 기반 단계별 일정(Phase 1~3, 산출물/마일스톤/검수기준), 품질관리(ISO/CMMI 적용, 코드리뷰/테스트 전략), 리스크 관리표(상위 5개, 영향도×발생가능성×대응방안), 형상/이슈/변경 관리
+- **5. 수행 실적 및 투입 인력**: 유사 프로젝트 3건 이상(고객사/기간/규모/역할/성과 수치), 핵심 인력 5명 이상(이름가명/직급/경력연수/주요 자격/투입 M/M/주요 수행 사례)
+- **6. 유지보수 및 기술 지원**: 무상 하자보수(기간/범위), 유상 SLA(가용성 99.9% 등), 기술지원 체계(24/7 콜센터/원격/현장), 패치 정책, KPI/리포팅 주기
+- **7. 투자 비용**: 비용 구성 요약(인건비/SW/HW/기타), 본 제안의 Value for Money 강조 (직접 비용 외 절감효과 포함)
 
-반드시 아래 JSON 형식으로만 반환하세요. 마크다운 코드블록 없이 순수 JSON만 출력:
-{"title":"제안서 제목","table_of_contents":["1. 제안 개요","  1.1 제안 배경 및 목적","  1.2 프로젝트 범위 및 기대효과","2. 현황 분석","  2.1 고객 환경 분석","  2.2 개선 방향 (AS-IS/TO-BE)","3. 제안 솔루션","  3.1 시스템 아키텍처","  3.2 핵심 기능 상세","  3.3 기술 스택 및 선정 근거","4. 수행 방안","  4.1 프로젝트 추진 체계","  4.2 일정 계획 (WBS)","  4.3 품질 및 리스크 관리","5. 수행 실적 및 투입 인력","  5.1 유사 프로젝트 레퍼런스","  5.2 핵심 투입 인력","6. 유지보수 및 기술 지원","7. 투자 비용"],"sections":{"1. 제안 개요":"내용...","2. 현황 분석":"내용...","3. 제안 솔루션":"내용...","4. 수행 방안":"내용...","5. 수행 실적 및 투입 인력":"내용...","6. 유지보수 및 기술 지원":"내용...","7. 투자 비용":"내용..."}}"""
+## 출력 JSON 스키마 (반드시 모든 필드 채워서 출력. 마크다운 코드블록 금지, 순수 JSON만)
+{
+  "title": "구체적 제안서 제목 (예: 'OO공사 차세대 통합관제시스템 구축 사업 제안서')",
+  "executive_summary": "Executive Summary 300~500자: 발주처 핵심 니즈 + 본 제안의 차별성 3가지 + 기대 효과 정량 수치",
+  "win_themes": [
+    {"theme": "Win Theme 1 (예: 검증된 안정성)", "message": "발주처에 전달할 핵심 메시지 한 줄"},
+    {"theme": "Win Theme 2", "message": "..."},
+    {"theme": "Win Theme 3", "message": "..."}
+  ],
+  "discriminators": [
+    {"point": "차별화 포인트 1", "proof": "이를 뒷받침하는 구체 근거(수치/사례/인증)"},
+    {"point": "차별화 포인트 2", "proof": "..."},
+    {"point": "차별화 포인트 3", "proof": "..."}
+  ],
+  "evaluation_mapping": [
+    {"criteria": "RFP 평가항목명 (예: 기술 이해도)", "weight": "30%", "section_ref": "3. 제안 솔루션", "key_message": "이 평가항목을 어떻게 만족시키는지 한 줄 요약"}
+  ],
+  "table_of_contents": ["1. 제안 개요","  1.1 제안 배경 및 목적","  1.2 프로젝트 범위 및 기대효과","  1.3 본 제안의 차별점","2. 현황 분석","  2.1 고객 환경 분석 (AS-IS)","  2.2 개선 방향 (TO-BE)","  2.3 Gap 분석 및 핵심 과제","3. 제안 솔루션","  3.1 전체 시스템 아키텍처","  3.2 핵심 기능 상세","  3.3 기술 스택 및 선정 근거","  3.4 데이터 및 시스템 연계 방안","4. 수행 방안","  4.1 프로젝트 추진 체계","  4.2 단계별 일정 계획 (WBS)","  4.3 품질 관리 방안","  4.4 리스크 관리 방안","  4.5 변경/형상/이슈 관리","5. 수행 실적 및 투입 인력","  5.1 유사 프로젝트 레퍼런스","  5.2 핵심 투입 인력 프로필","6. 유지보수 및 기술 지원","  6.1 하자보수 범위 및 기간","  6.2 SLA 및 기술 지원 체계","7. 투자 비용 개요","  7.1 비용 구성","  7.2 Value for Money"],
+  "sections": {
+    "1. 제안 개요": "600자 이상의 본문. 1.1~1.3 소제목별 단락 구성. 정량 수치 3개 이상 포함",
+    "2. 현황 분석": "600자 이상. AS-IS 한계 4개 이상 + TO-BE 청사진 + Gap 분석 + 우선 과제",
+    "3. 제안 솔루션": "800자 이상. 아키텍처(레이어/컴포넌트), 핵심 기능 5~7개(기능명/성능지표), 기술 스택 표 형식, 연계 방안",
+    "4. 수행 방안": "800자 이상. 추진 체계, Phase별 일정/산출물/마일스톤, 품질/리스크/변경 관리",
+    "5. 수행 실적 및 투입 인력": "600자 이상. 유사 프로젝트 3건(고객/기간/규모/성과), 핵심 인력 5명 이상(직급/경력/자격)",
+    "6. 유지보수 및 기술 지원": "500자 이상. 하자보수, SLA, 기술지원 체계, KPI",
+    "7. 투자 비용 개요": "400자 이상. 비용 구성 요약, Value for Money"
+  },
+  "references_summary": [
+    {"customer": "고객사", "project": "프로젝트명", "period": "수행 기간", "scale": "규모(금액/인원)", "outcome": "정량 성과"}
+  ],
+  "key_personnel": [
+    {"role": "역할 (예: PM)", "grade": "특급/고급/중급", "years": "경력 연수", "certs": "주요 자격증", "highlight": "대표 수행 이력 한 줄"}
+  ],
+  "risk_register": [
+    {"risk": "리스크", "impact": "영향(상/중/하)", "likelihood": "발생가능성(상/중/하)", "mitigation": "대응 방안"}
+  ]
+}"""
 
     user_msg = f"""## 회사 정보
 {company_info or '(제안사 정보를 기반으로 합리적으로 추정하여 작성하세요)'}
@@ -456,17 +890,88 @@ RFP 요구사항, 회사 정보, 레퍼런스를 결합하여 **바로 제출 �
 
 @app.post("/api/review-proposal")
 async def review_proposal(
+    request: Request,
     rfp_id: str = Form(None),
     proposal_text: str = Form(""),
 ):
+    require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
     rfp_text = ""
     if rfp_id and db.rfp_exists(rfp_id):
         meta = db.get_rfp_meta(rfp_id)
         rfp_text = extract_pdf_text(meta["filepath"])[:4000] if meta and Path(meta["filepath"]).exists() else ""
 
-    system = """당신은 제안서 리뷰 전문가(레드팀)입니다.
-제안서를 비판적으로 검토하여 반드시 아래 JSON 형식으로만 반환하세요. 마크다운 코드블록 없이 순수 JSON만 출력하세요:
-{"overall_score":78,"grade":"B+","review_items":[{"category":"항목","score":80,"status":"양호/보통/보완필요","comment":"코멘트"}],"missing_requirements":["누락사항"],"logic_issues":["불일치사항"],"improvement_suggestions":["개선제안"]}"""
+    system = """당신은 발주처 평가위원 출신의 제안서 레드팀 리뷰 책임자입니다.
+RFP 원문과 제안서 본문을 대조하여 **실제 평가표 채점 수준의 상세 리뷰**를 수행하세요.
+
+## 리뷰 원칙
+1. **요구사항 추적성(Requirements Traceability)**: RFP 모든 요구사항(REQ-XXX)에 대해 충족/부분충족/누락을 명시
+2. **평가위원 페르소나 3종**: 기술평가(아키텍처/기술 스택), 사업평가(가격/일정/위험), 운영평가(유지보수/지원) 관점에서 별도 점수 산출
+3. **섹션별 강점/약점**: 각 메인 섹션별 강점 1개·약점 1개 이상
+4. **정량 진단**: 점수는 단순 평균이 아니라 가중 평균(평가기준 가중치 적용)
+5. **개선 제안의 우선순위·작업량 표기**: 즉시(P0)·1주이내(P1)·여유(P2)
+6. **wording 개선 예시**: 약한 표현 → 강한 표현 변환 예시 3개 이상
+
+## 출력 JSON 스키마 (마크다운 금지, 순수 JSON만)
+{
+  "overall_score": 78,
+  "weighted_score": 76.8,
+  "grade": "B+",
+  "win_probability": "65%",
+  "summary": "제안서 종합 한 줄 평 (강점·약점 균형)",
+  "review_items": [
+    {"category": "RFP 요구사항 충족도", "score": 85, "max": 100, "status": "양호", "comment": "구체적 코멘트"},
+    {"category": "기술적 타당성", "score": 80, "max": 100, "status": "양호", "comment": "..."},
+    {"category": "수행 방안의 명확성", "score": 75, "max": 100, "status": "보통", "comment": "..."},
+    {"category": "차별화 요소", "score": 65, "max": 100, "status": "보완필요", "comment": "..."},
+    {"category": "수행 실적/레퍼런스", "score": 82, "max": 100, "status": "양호", "comment": "..."},
+    {"category": "투입 인력 적정성", "score": 78, "max": 100, "status": "양호", "comment": "..."},
+    {"category": "가격 경쟁력", "score": 75, "max": 100, "status": "보통", "comment": "..."},
+    {"category": "유지보수/지원 체계", "score": 80, "max": 100, "status": "양호", "comment": "..."},
+    {"category": "문서 완성도", "score": 82, "max": 100, "status": "양호", "comment": "..."}
+  ],
+  "evaluator_perspectives": [
+    {"persona": "기술 평가위원", "score": 78, "key_concern": "기술 스택 선정 사유는 명확하나, 대안 비교 부족", "key_strength": "아키텍처 도식이 구체적"},
+    {"persona": "사업 평가위원", "score": 74, "key_concern": "가격 산정 근거 일부 미흡, 리스크 대응 비용 누락 가능", "key_strength": "일정이 현실적"},
+    {"persona": "운영 평가위원", "score": 81, "key_concern": "SLA 위반 시 페널티 조항 명시 부족", "key_strength": "24/7 지원 체계 우수"}
+  ],
+  "requirements_traceability": [
+    {"req_id": "REQ-001", "title": "사용자 인증/SSO", "status": "충족", "section_ref": "3.2 핵심 기능", "evidence": "구현 방안과 성능 지표 명시"},
+    {"req_id": "REQ-002", "title": "실시간 대시보드", "status": "부분충족", "section_ref": "3.2", "gap": "동시 사용자 1,000명 처리 검증 자료 미제시"},
+    {"req_id": "REQ-006", "title": "ERP 연동", "status": "누락", "section_ref": "-", "gap": "ERP 인터페이스 명세·전문 정의 누락"}
+  ],
+  "section_analysis": [
+    {"section": "1. 제안 개요", "strengths": ["기대효과 정량 수치 제시", "차별점 명확"], "weaknesses": ["발주처 명시적 호명 부족"]},
+    {"section": "3. 제안 솔루션", "strengths": ["아키텍처 구체적"], "weaknesses": ["기술 스택 대안 비교 표 없음", "보안 통제 항목 누락"]},
+    {"section": "4. 수행 방안", "strengths": ["WBS 상세"], "weaknesses": ["크리티컬 패스 식별 부재"]}
+  ],
+  "missing_requirements": [
+    {"req_id": "REQ-006", "description": "ERP 연동 상세 인터페이스 명세", "severity": "치명적"},
+    {"req_id": "REQ-009", "description": "재해복구(DR) 방안 누락", "severity": "높음"},
+    {"req_id": "REQ-011", "description": "데이터 마이그레이션 절차 미정의", "severity": "높음"}
+  ],
+  "logic_issues": [
+    {"issue": "3.2절 '6개월 완료' vs 4.2절 '8개월 일정표' 불일치", "where": "3.2 ↔ 4.2", "fix": "일정 통일 또는 단계별 출시 명시"},
+    {"issue": "투입 인력 10명 제안 vs 유사 프로젝트 15명 사례 괴리", "where": "4.1 ↔ 5.2", "fix": "축소 운영 근거 또는 인원 보강 제시"}
+  ],
+  "improvement_suggestions": [
+    {"priority": "P0", "effort": "1일", "suggestion": "ERP 연동 아키텍처 다이어그램 + 인터페이스 표 추가", "impact": "치명적 누락 보완 → 점수 8점 상승 예상"},
+    {"priority": "P0", "effort": "0.5일", "suggestion": "DR 방안 절 추가 (RPO/RTO/이중화 구조)", "impact": "리스크 평가 가산 가능"},
+    {"priority": "P1", "effort": "1일", "suggestion": "Phase별 마일스톤·산출물·검수기준 명확화", "impact": "프로젝트 관리 평가 5점 상승"},
+    {"priority": "P1", "effort": "0.5일", "suggestion": "경쟁사 대비 기술 우위 비교 표 작성", "impact": "차별화 평가 강화"},
+    {"priority": "P2", "effort": "1일", "suggestion": "고객 인터뷰 기반 Pain Point 해결 사례 추가", "impact": "공감 가능성 상승"}
+  ],
+  "wording_improvements": [
+    {"before": "안정적인 시스템을 제공합니다", "after": "동일 규모 12건 무중단 운영 — 가용성 99.95% 검증된 시스템을 제공합니다", "why": "정량 수치로 신뢰도 강화"},
+    {"before": "신속한 대응이 가능합니다", "after": "Critical 1시간 / High 4시간 SLA를 24/7 보장합니다", "why": "구체적 SLA 명시"},
+    {"before": "우수한 기술력을 보유하고 있습니다", "after": "정보관리기술사 3명, PMP 5명, 클라우드 자격 12명 보유", "why": "자격증 수치로 객관화"}
+  ],
+  "competitor_gaps": [
+    {"area": "가격", "our_position": "중상위(8% 절감)", "risk": "최저가 입찰사 대비 가격 평가 1~2점 열위 가능", "counter": "TCO 절감 효과로 Value for Money 강조"},
+    {"area": "수행 실적", "our_position": "우위(12건)", "risk": "-", "counter": "정량 성과 표 전면 배치"}
+  ]
+}"""
 
     user_msg = f"제안서 내용:\n{proposal_text[:6000]}"
     if rfp_text:
@@ -484,10 +989,14 @@ async def review_proposal(
 
 @app.post("/api/strategy")
 async def strategy(
+    request: Request,
     rfp_id: str = Form(None),
     company_strengths: str = Form(""),
     market_context: str = Form(""),
 ):
+    require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
     rfp_text = ""
     if rfp_id and db.rfp_exists(rfp_id):
         meta = db.get_rfp_meta(rfp_id)
@@ -549,11 +1058,13 @@ async def strategy(
 
 @app.post("/api/knowledge/save")
 async def save_knowledge(
+    request: Request,
     category: str = Form(...),
     title: str = Form(...),
     content: str = Form(...),
     tags: str = Form(""),
 ):
+    require_user(request)
     item = {
         "id": str(uuid.uuid4())[:8],
         "category": category,
@@ -568,16 +1079,21 @@ async def save_knowledge(
 
 
 @app.get("/api/knowledge/list")
-async def list_knowledge_api(category: Optional[str] = None):
+async def list_knowledge_api(request: Request, category: Optional[str] = None):
+    require_user(request)
     items = db.list_knowledge(category)
     return JSONResponse({"items": items, "total": len(items)})
 
 
 @app.post("/api/knowledge/recommend")
 async def recommend_knowledge(
+    request: Request,
     rfp_id: str = Form(None),
     query: str = Form(""),
 ):
+    require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
     system = "당신은 지식 자산 관리 전문가입니다. 관련 지식 자산을 추천하고, 재사용 가능한 문장과 템플릿을 JSON으로 제안하세요."
     rfp_text = ""
     if rfp_id and db.rfp_exists(rfp_id):
@@ -594,7 +1110,8 @@ async def recommend_knowledge(
 # ─── 7. 제안서 Export (Markdown) ───
 
 @app.post("/api/export-proposal")
-async def export_proposal(proposal_text: str = Form("")):
+async def export_proposal(request: Request, proposal_text: str = Form("")):
+    require_user(request)
     system = """당신은 문서 변환 전문가입니다.
 제안서 내용을 깔끔한 Markdown 문서로 변환하세요.
 목차, 섹션 제목, 본문을 포함한 완성된 문서를 만들어주세요.
@@ -608,7 +1125,8 @@ async def export_proposal(proposal_text: str = Form("")):
 
 
 @app.post("/api/export-docx")
-async def export_docx(proposal_text: str = Form("")):
+async def export_docx(request: Request, proposal_text: str = Form("")):
+    require_user(request)
     import io
     from docx import Document
     from docx.shared import Pt, Inches, RGBColor
@@ -687,7 +1205,8 @@ async def export_docx(proposal_text: str = Form("")):
 
 
 @app.post("/api/export-pptx")
-async def export_pptx(proposal_text: str = Form("")):
+async def export_pptx(request: Request, proposal_text: str = Form("")):
+    require_user(request)
     import io, math
     from pptx import Presentation
     from pptx.util import Inches, Pt, Emu
@@ -1008,84 +1527,124 @@ async def export_pptx(proposal_text: str = Form("")):
 # ─── 8. 사업 견적 산출 ───
 
 @app.post("/api/estimate")
-async def estimate_cost(rfp_id: str = Form(None), additional_info: str = Form("")):
+async def estimate_cost(request: Request, rfp_id: str = Form(None), additional_info: str = Form("")):
+    require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
     rfp_text = ""
     if rfp_id and db.rfp_exists(rfp_id):
         meta = db.get_rfp_meta(rfp_id)
         rfp_text = extract_pdf_text(meta["filepath"])[:6000] if meta and Path(meta["filepath"]).exists() else ""
 
-    system = """당신은 IT 프로젝트 사업 견적 전문가입니다.
-RFP를 분석하여 상세한 사업 견적을 산출하세요.
+    system = """당신은 공공/대기업 IT 사업 견적 전문 PM 겸 가격 전략가입니다.
+RFP를 분석하여 **수주 가능한 가격대**의 상세 사업 견적을 산출하세요.
 
-반드시 아래 JSON 형식으로만 반환하세요. 마크다운 코드블록 없이 순수 JSON만 출력:
+## 산출 표준 (반드시 준수)
+1. **노임단가 기준**: 한국소프트웨어산업협회(KOSA) "SW기술자 평균임금" 2024년 공표 단가 적용
+   - 기술사/특급: 약 9,400만원/년 (월 환산 약 783만원, 실 투입가 약 450만원/월)
+   - 고급: 약 8,000만원/년 (실 투입가 약 380만원/월)
+   - 중급: 약 6,500만원/년 (실 투입가 약 310만원/월)
+   - 초급: 약 5,000만원/년 (실 투입가 약 240만원/월)
+   - **단가 산출 근거에 노임단가 표를 반드시 명시**
+
+2. **인건비 구성**: PM(1)/PL(1~2)/아키텍트(1)/개발자(다수)/QA(1~2)/디자이너(0~1) — RFP 복잡도에 따라 조정. 인력별 투입 M/M는 Phase별 단계 일정에 맞춰 산정 (전 기간 100% 투입 가정 금지)
+
+3. **인프라/HW**: 클라우드(AWS/Azure/GCP) 우선. 온프레미스는 RFP 명시 시에만.
+   - 클라우드 운영비 산정 기준: t3/m5 small=월 5만, medium=15만, large=30만, xlarge=60만, 2xlarge=120만
+   - RDS db.m5.large=80만/월, ElastiCache 30만, ALB 5만, S3+CloudFront 20만 등
+   - GPU: AWS p4d.24xlarge 월 3,000~4,000만 / 온프 H100 3~5억, A100 1~2억
+   - 네트워크/보안: 방화벽 1,000~3,000만, L4 스위치 500~1,500만
+
+4. **SW 라이선스**: Datadog $15/host/월, GitHub Enterprise $21/user/월, Atlassian, MS Office 등 실제 거래가 반영
+
+5. **부가세·마진·예비비 분리 표기**: 본 견적의 직접비, 일반관리비(7~10%), 이윤(8~12%), 예비비(5%), 부가세(10%) 명시. **부가세 별도** 원칙.
+
+6. **수주 가격 전략 옵션**: Base(권장), Aggressive(-8~12%, 마진 최소화), Premium(+10%, 안정성 강화) 3안 제시
+
+7. **분기/마일스톤 결제 일정**: 일반적으로 착수금 20% / 중간보고 40% / 검수완료 40% (조정 가능)
+
+8. **시장 평균 비교**: 동일 규모 사업의 시장 평균 견적 추정값을 제시하고 본 견적의 절감률/프리미엄을 명시
+
+## 금액 검증 규칙
+- 단일 카테고리가 전체의 80% 초과 금지 (인건비는 통상 60~75%)
+- HW/인프라가 40% 초과 시 클라우드 대안 반드시 제시
+- 비현실적 단가(특급 600만원 이상, 일반 서버 5천만 이상)는 근거 명시
+
+## 출력 JSON 스키마 (모든 필드 채워서 출력. 마크다운 코드블록 금지, 순수 JSON만)
 {
-  "project_name": "프로젝트명",
-  "total_cost": "총 예상 금액 (원)",
-  "total_cost_number": 0,
+  "project_name": "구체적 프로젝트명",
+  "total_cost": "총 5억 6,160만원 (VAT 별도)",
+  "total_cost_number": 561600000,
+  "total_cost_with_vat": "6억 1,776만원 (VAT 포함)",
+  "total_cost_with_vat_number": 617760000,
   "duration_months": 6,
-  "summary": "견적 요약 설명 (2~3문장)",
+  "summary": "견적 요약 2~3문장 — 산정 근거(노임단가, 클라우드 임대 기준)와 가격 포지션 명시",
+  "labor_rate_basis": {
+    "source": "KOSA SW기술자 평균임금 2024년 공표",
+    "rates": [
+      {"grade": "특급", "annual": "9,400만원/년", "monthly": "약 450만원/월(실투입 기준)"},
+      {"grade": "고급", "annual": "8,000만원/년", "monthly": "약 380만원/월"},
+      {"grade": "중급", "annual": "6,500만원/년", "monthly": "약 310만원/월"},
+      {"grade": "초급", "annual": "5,000만원/년", "monthly": "약 240만원/월"}
+    ]
+  },
   "categories": [
     {
       "name": "인건비",
-      "subtotal": "금액 (원)",
+      "subtotal": "금액 표기",
       "subtotal_number": 0,
-      "ratio": "전체 비율 (%)",
+      "ratio": "비율 %",
       "items": [
-        {"role": "역할명", "grade": "등급 (특급/고급/중급/초급)", "count": 1, "months": 6, "unit_cost": "월 단가 (원)", "cost": "금액 (원)", "reason": "해당 인력이 필요한 상세 사유"}
+        {"role": "PM", "grade": "특급", "count": 1, "months": 6, "unit_cost": "450만원", "cost": "2,700만원", "reason": "프로젝트 총괄 (PMP 보유 권장)"}
       ]
     },
-    {
-      "name": "SW 라이선스",
-      "subtotal": "금액 (원)",
-      "subtotal_number": 0,
-      "ratio": "비율 (%)",
-      "items": [
-        {"item": "항목명", "cost": "금액 (원)", "reason": "필요 사유"}
-      ]
-    },
-    {
-      "name": "HW/인프라",
-      "subtotal": "금액 (원)",
-      "subtotal_number": 0,
-      "ratio": "비율 (%)",
-      "items": [
-        {"item": "항목명", "cost": "금액 (원)", "reason": "필요 사유"}
-      ]
-    },
-    {
-      "name": "기타 경비",
-      "subtotal": "금액 (원)",
-      "subtotal_number": 0,
-      "ratio": "비율 (%)",
-      "items": [
-        {"item": "항목명", "cost": "금액 (원)", "reason": "필요 사유"}
-      ]
-    }
+    {"name": "SW 라이선스", "subtotal": "...", "subtotal_number": 0, "ratio": "...", "items": [{"item": "...", "cost": "...", "reason": "..."}]},
+    {"name": "HW/인프라", "subtotal": "...", "subtotal_number": 0, "ratio": "...", "items": [{"item": "...", "cost": "...", "reason": "..."}]},
+    {"name": "기타 경비", "subtotal": "...", "subtotal_number": 0, "ratio": "...", "items": [{"item": "...", "cost": "...", "reason": "..."}]}
   ],
+  "phase_breakdown": [
+    {"phase": "Phase 1: 기반 구축", "months": "1~2", "cost": "1억 3,000만원", "cost_number": 130000000, "deliverables": "아키텍처 설계서, 인프라 구축 완료보고서"},
+    {"phase": "Phase 2: 핵심 개발", "months": "3~5", "cost": "2억 8,000만원", "cost_number": 280000000, "deliverables": "기능 개발 완료, 통합 테스트 결과"},
+    {"phase": "Phase 3: 안정화/이관", "months": "6", "cost": "1억 5,160만원", "cost_number": 151600000, "deliverables": "검수 완료, 운영 인계서"}
+  ],
+  "cost_structure": {
+    "direct_cost": "4억 9,000만원",
+    "direct_cost_number": 490000000,
+    "general_admin": {"label": "일반관리비 (8%)", "amount": "3,920만원", "amount_number": 39200000},
+    "profit": {"label": "이윤 (10%)", "amount": "5,292만원", "amount_number": 52920000},
+    "contingency": {"label": "예비비 (5%)", "amount": "2,910만원", "amount_number": 29100000},
+    "vat": {"label": "부가세 (10%)", "amount": "5,612만원", "amount_number": 56120000}
+  },
+  "pricing_options": [
+    {"option": "Base (권장)", "total": "6억 1,776만원", "rationale": "표준 노임단가 + 정상 마진 10% + 시장 평균 -8%", "win_probability": "60%"},
+    {"option": "Aggressive (저가)", "total": "5억 5,000만원", "rationale": "마진 5%, 예비비 축소. 레퍼런스 확보 우선 시", "win_probability": "75%"},
+    {"option": "Premium (고가)", "total": "6억 8,000만원", "rationale": "프리미엄 인력 풀투입 + 강화된 SLA. 품질·안정성 평가 가중치 높을 때", "win_probability": "45%"}
+  ],
+  "payment_milestones": [
+    {"milestone": "착수금", "ratio": "20%", "amount": "1억 2,355만원", "trigger": "계약 체결 후 7일 이내"},
+    {"milestone": "중간 검수", "ratio": "40%", "amount": "2억 4,710만원", "trigger": "Phase 2 완료 + 중간 보고서 승인"},
+    {"milestone": "최종 검수", "ratio": "40%", "amount": "2억 4,710만원", "trigger": "최종 검수 합격 + 인계 완료"}
+  ],
+  "market_comparison": {
+    "market_average": "6억 1,000만원",
+    "market_average_number": 610000000,
+    "our_total": "5억 6,160만원",
+    "delta_pct": "-8%",
+    "interpretation": "시장 평균 대비 8% 절감. 가격 평가 가산 기대"
+  },
   "risks": [
-    {"risk": "비용 리스크", "impact": "영향 금액 또는 비율", "mitigation": "대응 방안"}
+    {"risk": "요구사항 변경 (Scope Creep)", "impact": "직접비 10~15% 증가 가능", "mitigation": "변경관리 프로세스 + CCB 승인 절차"},
+    {"risk": "특급 인력 수급 지연", "impact": "1~2개월 일정 지연", "mitigation": "사전 인력 확정 + 백업 인력 2명 확보"},
+    {"risk": "클라우드 환율 변동", "impact": "인프라 비용 5~8% 변동", "mitigation": "환율 헤지 또는 환차 보존 조항"}
   ],
-  "assumptions": ["견적 전제 조건 1", "견적 전제 조건 2"],
-  "notes": "참고사항 및 할인/협상 여지"
-}
-
-산출 기준 (반드시 준수):
-- 인건비: SW기술자 노임단가 기준 (2024년 기준 특급 약 450만원/월, 고급 380만원, 중급 310만원, 초급 240만원)
-- RFP 요구사항의 복잡도, 기술 스택, 기간을 고려하여 현실적인 인력 구성
-
-HW/인프라 가격 기준 (반드시 준수):
-- 클라우드 서비스(AWS/Azure/GCP)를 우선 검토. 온프레미스 서버 구매는 RFP가 명시적으로 요구할 때만
-- GPU 서버: 클라우드 GPU 인스턴스 임대 기준으로 산정 (예: AWS p4d.24xlarge 약 월 3,000~4,000만원)
-- 온프레미스 GPU 서버 구매가 필요한 경우: NVIDIA H100 서버 1대 약 3~5억원, A100 서버 1대 약 1~2억원 수준
-- 일반 서버: 클라우드 기준 월 50~300만원, 온프레미스 구매 시 대당 1,000~5,000만원
-- 네트워크/보안 장비: 방화벽 1,000~3,000만원, L4 스위치 500~1,500만원
-
-금액 검증 규칙:
-- 단일 항목이 전체 견적의 60%를 초과하면 안 됨
-- HW/인프라 비용이 전체의 40%를 초과하면 클라우드 대안을 반드시 제시
-- 각 항목의 금액은 한국 IT 시장의 실제 거래 가격 기준
-- 비현실적으로 높은 금액(단일 항목 10억 이상)은 근거를 반드시 명시
-- 총액은 한국 IT 시장 기준 현실적인 수준으로 산정"""
+  "assumptions": [
+    "노임단가는 KOSA 2024년 공표 기준 적용",
+    "클라우드 서비스는 종량제, 1년 약정 기준",
+    "6개월 고정 기간 산정 (연장 시 추가 협의)",
+    "출장/숙박 등 실비는 별도 정산"
+  ],
+  "notes": "본 견적은 RFP 기반 추정치이며, 요구사항 확정 후 ±10% 조정 가능. 부가세 별도. 결제는 마일스톤 기준."
+}"""
 
     user_msg = "다음 RFP를 분석하여 상세 사업 견적을 산출해주세요."
     if rfp_text:
@@ -1106,11 +1665,13 @@ HW/인프라 가격 기준 (반드시 준수):
 
 @app.post("/api/pipeline/run")
 async def run_pipeline(
+    request: Request,
     rfp_id: str = Form(...),
     company_info: str = Form(""),
     industry: str = Form("IT"),
     customer_type: str = Form("대기업"),
 ):
+    check_rfp_access(request, rfp_id)
     rfp = db.get_rfp_meta(rfp_id)
     if not rfp:
         raise HTTPException(404, "RFP를 찾을 수 없습니다.")
@@ -1162,7 +1723,8 @@ JSON으로만 반환. 마크다운 코드블록 없이:
 # ─── 9. AI 경쟁력 채점 ───
 
 @app.post("/api/score-proposal")
-async def score_proposal(proposal_text: str = Form("")):
+async def score_proposal(request: Request, proposal_text: str = Form("")):
+    require_user(request)
     system = """당신은 제안서 경쟁력 채점 AI입니다.
 제안서를 분석하고 반드시 아래 JSON 형식으로만 반환하세요. 마크다운 코드블록 없이 순수 JSON만:
 {"total_score":82,"max_score":100,"grade":"A","categories":[{"name":"기술 이해도","score":85,"max":100,"feedback":"피드백"},{"name":"실현 가능성","score":78,"max":100,"feedback":"피드백"},{"name":"차별화","score":70,"max":100,"feedback":"피드백"},{"name":"문서 완성도","score":80,"max":100,"feedback":"피드백"},{"name":"가격 경쟁력","score":75,"max":100,"feedback":"피드백"}],"strengths":["강점1"],"weaknesses":["약점1"],"win_probability":"65%"}"""
@@ -1189,7 +1751,8 @@ async def score_proposal(proposal_text: str = Form("")):
 # ─── 결과 조회 API ───
 
 @app.get("/api/results/{rfp_id}")
-async def get_results(rfp_id: str):
+async def get_results(request: Request, rfp_id: str):
+    check_rfp_access(request, rfp_id)
     data = db.get_pipeline(rfp_id)
     return JSONResponse({
         "results": data.get("results", {}),
@@ -1201,11 +1764,13 @@ async def get_results(rfp_id: str):
 
 @app.post("/api/version/save")
 async def save_version(
+    request: Request,
     rfp_id: str = Form(...),
     content: str = Form(...),
     score: int = Form(0),
     note: str = Form(""),
 ):
+    check_rfp_access(request, rfp_id)
     ver_num = db.count_versions(rfp_id) + 1
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     db.insert_version(rfp_id, ver_num, content, score, note, created_at)
@@ -1215,7 +1780,8 @@ async def save_version(
 
 
 @app.get("/api/version/list/{rfp_id}")
-async def list_versions_api(rfp_id: str):
+async def list_versions_api(request: Request, rfp_id: str):
+    check_rfp_access(request, rfp_id)
     versions = db.list_versions(rfp_id)
     return JSONResponse({"versions": versions})
 
@@ -1223,12 +1789,14 @@ async def list_versions_api(rfp_id: str):
 # ─── 11. 팀 협업 ───
 
 @app.post("/api/team/init")
-async def team_init(rfp_id: str = Form(...)):
+async def team_init(request: Request, rfp_id: str = Form(...)):
+    check_rfp_access(request, rfp_id)
     return JSONResponse(db.get_team(rfp_id))
 
 
 @app.post("/api/team/add-member")
-async def add_member(rfp_id: str = Form(...), name: str = Form(...), role: str = Form("")):
+async def add_member(request: Request, rfp_id: str = Form(...), name: str = Form(...), role: str = Form("")):
+    check_rfp_access(request, rfp_id)
     member_id = str(uuid.uuid4())[:6]
     db.add_team_member(rfp_id, member_id, name, role)
     log_activity("팀원 추가", f"{name} ({role})")
@@ -1237,7 +1805,8 @@ async def add_member(rfp_id: str = Form(...), name: str = Form(...), role: str =
 
 
 @app.post("/api/team/remove-member")
-async def remove_member(rfp_id: str = Form(...), member_id: str = Form(...)):
+async def remove_member(request: Request, rfp_id: str = Form(...), member_id: str = Form(...)):
+    check_rfp_access(request, rfp_id)
     existed = db.remove_team_member(rfp_id, member_id)
     if existed:
         log_activity("팀원 삭제", f"ID: {member_id}")
@@ -1247,10 +1816,12 @@ async def remove_member(rfp_id: str = Form(...), member_id: str = Form(...)):
 
 @app.post("/api/team/add-section")
 async def add_section(
+    request: Request,
     rfp_id: str = Form(...),
     title: str = Form(...),
     assignee: str = Form(""),
 ):
+    check_rfp_access(request, rfp_id)
     section_id = str(uuid.uuid4())[:6]
     db.add_team_section(rfp_id, section_id, title, assignee)
     team = db.get_team(rfp_id)
@@ -1259,18 +1830,22 @@ async def add_section(
 
 @app.post("/api/team/update-assignee")
 async def update_assignee(
+    request: Request,
     rfp_id: str = Form(...),
     section_id: str = Form(...),
     assignee: str = Form(...),
 ):
+    check_rfp_access(request, rfp_id)
     db.update_section_assignee(section_id, assignee)
     return JSONResponse({"ok": True})
 
 
 @app.post("/api/team/auto-assign")
 async def auto_assign(
+    request: Request,
     rfp_id: str = Form(...),
 ):
+    check_rfp_access(request, rfp_id)
     if not db.rfp_exists(rfp_id):
         raise HTTPException(404, "RFP를 찾을 수 없습니다.")
     meta = db.get_rfp_meta(rfp_id)
@@ -1337,10 +1912,12 @@ RFP를 분석하여 제안서 작성에 필요한 섹션과 담당자를 자동 
 
 @app.post("/api/team/update-status")
 async def update_section_status(
+    request: Request,
     rfp_id: str = Form(...),
     section_id: str = Form(...),
     status: str = Form(...),
 ):
+    check_rfp_access(request, rfp_id)
     title = db.update_section_status(section_id, status)
     if title:
         await ws_manager.notify("섹션 상태 변경", f"{title} → {status}")
@@ -1349,18 +1926,21 @@ async def update_section_status(
 
 @app.post("/api/team/add-comment")
 async def add_comment(
+    request: Request,
     rfp_id: str = Form(...),
     section_id: str = Form(...),
     author: str = Form(...),
     text: str = Form(...),
 ):
+    check_rfp_access(request, rfp_id)
     db.add_section_comment(section_id, author, text, datetime.now().strftime("%H:%M"))
     await ws_manager.notify("코멘트 추가", f"{author}: {text[:30]}")
     return JSONResponse({"ok": True})
 
 
 @app.get("/api/team/{rfp_id}")
-async def get_team_api(rfp_id: str):
+async def get_team_api(request: Request, rfp_id: str):
+    check_rfp_access(request, rfp_id)
     return JSONResponse(db.get_team(rfp_id))
 
 
@@ -1368,9 +1948,13 @@ async def get_team_api(rfp_id: str):
 
 @app.post("/api/schedule/generate")
 async def generate_schedule(
+    request: Request,
     deadline: str = Form(...),
     rfp_id: str = Form(None),
 ):
+    require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
     try:
         dl = datetime.strptime(deadline, "%Y-%m-%d")
     except ValueError:
@@ -1414,7 +1998,8 @@ async def generate_schedule(
 # ─── 13. PDF 제안서 생성 ───
 
 @app.post("/api/export-pdf")
-async def export_pdf(proposal_text: str = Form("")):
+async def export_pdf(request: Request, proposal_text: str = Form("")):
+    require_user(request)
     import io
     from fpdf import FPDF
 
@@ -1507,14 +2092,17 @@ async def export_pdf(proposal_text: str = Form("")):
 
 
 @app.get("/api/history/{rfp_id}")
-async def get_history_api(rfp_id: str, step: str = None):
+async def get_history_api(request: Request, rfp_id: str, step: str = None):
+    check_rfp_access(request, rfp_id)
     items = db.get_history(rfp_id, step)
     return JSONResponse({"history": items})
 
 
 @app.get("/api/rfp-list")
-async def rfp_list_api():
-    rfps = db.list_rfps()
+async def rfp_list_api(request: Request):
+    user = require_user(request)
+    owner_id = None if user.get("is_admin") else user["id"]
+    rfps = db.list_rfps(owner_id)
     pipelines = db.list_pipelines()
     items = []
     for v in rfps:
@@ -1525,7 +2113,8 @@ async def rfp_list_api():
 
 
 @app.delete("/api/rfp/{rfp_id}")
-async def delete_rfp(rfp_id: str):
+async def delete_rfp(request: Request, rfp_id: str):
+    check_rfp_access(request, rfp_id)
     meta = db.get_rfp_meta(rfp_id)
     fname = meta["filename"] if meta else ""
     filepath = db.delete_rfp(rfp_id)
@@ -1536,7 +2125,8 @@ async def delete_rfp(rfp_id: str):
 
 
 @app.get("/api/rfp-detail/{rfp_id}")
-async def rfp_detail(rfp_id: str):
+async def rfp_detail(request: Request, rfp_id: str):
+    check_rfp_access(request, rfp_id)
     rfp = db.get_rfp_meta(rfp_id)
     if not rfp:
         raise HTTPException(404, "RFP를 찾을 수 없습니다.")
@@ -1553,7 +2143,17 @@ async def rfp_detail(rfp_id: str):
 
 @app.websocket("/ws/{username}")
 async def websocket_endpoint(ws: WebSocket, username: str):
-    await ws_manager.connect(ws, username)
+    uid = ws.session.get("uid") if hasattr(ws, "session") else None
+    if not uid:
+        await ws.close(code=1008)
+        return
+    user = db.get_user_by_id(uid)
+    if not user:
+        await ws.close(code=1008)
+        return
+    # Force username to match the authenticated user — ignore URL spoofing
+    safe_username = user["username"]
+    await ws_manager.connect(ws, safe_username)
     try:
         while True:
             await ws.receive_text()  # keep alive

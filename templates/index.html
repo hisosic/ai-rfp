@@ -14,21 +14,38 @@
     <title>RFP AI Analyzer - AI 제안 업무 자동화 플랫폼</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/style.css">
+    <link rel="stylesheet" href="static/css/style.css?v=260421d">
 </head>
 <body>
 
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
-<!-- Username Modal -->
-<div id="usernameModal" class="modal-overlay show" style="z-index:999">
-    <div class="modal" style="max-width:400px;text-align:center">
-        <div class="modal-title" style="margin-bottom:8px">사용자 이름 입력</div>
-        <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px">실시간 협업을 위해 이름을 입력해주세요</p>
-        <input class="form-control" id="usernameInput" placeholder="예: 홍길동" style="text-align:center;font-size:16px;margin-bottom:16px"
-               onkeydown="if(event.key==='Enter')confirmUsername()">
-        <button class="btn btn-primary btn-lg" style="width:100%" onclick="confirmUsername()">입장</button>
+<!-- Login / Register Modal -->
+<div id="authModal" class="modal-overlay show" style="z-index:999">
+    <div class="modal" style="max-width:400px">
+        <div class="modal-title" style="margin-bottom:8px;text-align:center" id="authTitle">로그인</div>
+        <p style="color:var(--text-muted);font-size:14px;margin-bottom:16px;text-align:center" id="authSubtitle">계정으로 로그인하세요</p>
+        <input class="form-control" id="authUsername" placeholder="아이디" style="margin-bottom:10px"
+               onkeydown="if(event.key==='Enter')document.getElementById('authPassword').focus()">
+        <input class="form-control" id="authPassword" type="password" placeholder="비밀번호" style="margin-bottom:16px"
+               onkeydown="if(event.key==='Enter')submitAuth()">
+        <button class="btn btn-primary btn-lg" style="width:100%;margin-bottom:10px" onclick="submitAuth()" id="authSubmitBtn">로그인</button>
+        <div style="text-align:center;font-size:13px;color:var(--text-muted)">
+            <span id="authToggleText">계정이 없으신가요?</span>
+            <a href="#" onclick="toggleAuthMode();return false" id="authToggleBtn" style="color:var(--primary);font-weight:600">회원가입</a>
+        </div>
+    </div>
+</div>
+
+<!-- Admin Users Modal -->
+<div id="adminModal" class="modal-overlay" onclick="if(event.target===this)closeAdminModal()">
+    <div class="modal" style="max-width:700px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <div class="modal-title">사용자 관리</div>
+            <button class="btn btn-outline" onclick="closeAdminModal()">&times; 닫기</button>
+        </div>
+        <div id="adminUsersList">로딩 중...</div>
     </div>
 </div>
 
@@ -48,7 +65,7 @@
 </div>
 
 <!-- Sidebar -->
-<nav class="sidebar">
+<nav class="sidebar" id="mainSidebar" style="display:none">
     <div class="sidebar-header">
         <div class="sidebar-logo">
             <div class="logo-icon">R</div>
@@ -138,7 +155,7 @@
 </nav>
 
 <!-- Main -->
-<div class="main">
+<div class="main" id="mainContent" style="display:none">
     <div class="topbar">
         <button class="mobile-menu-btn" onclick="toggleSidebar()">&#9776;</button>
         <div class="topbar-title">Dashboard</div>
@@ -148,6 +165,11 @@
                 <span id="onlineCount">1</span>명 접속중
             </div>
             <span class="topbar-badge">PARAIX Hackathon 2026</span>
+            <div id="userMenu" style="display:none;align-items:center;gap:8px">
+                <span id="userDisplayName" style="font-size:13px;font-weight:600;color:var(--text)"></span>
+                <button id="adminBtn" class="btn btn-outline btn-sm" style="display:none" onclick="openAdminModal()">사용자 관리</button>
+                <button class="btn btn-outline btn-sm" onclick="logout()">로그아웃</button>
+            </div>
         </div>
     </div>
     <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
@@ -494,6 +516,6 @@
     </div>
 </div>
 
-<script src="static/js/app.js"></script>
+<script src="static/js/app.js?v=260421d"></script>
 </body>
 </html>

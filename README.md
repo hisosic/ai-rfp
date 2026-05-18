@@ -7,6 +7,7 @@ AI 기반 제안서(RFP) 분석 및 제안 업무 자동화 플랫폼
 
 ## 주요 기능
 
+- **계정 관리**: 계정 생성/로그인, 계정별 RFP 데이터 분리, 관리자 계정을 통한 사용자 관리
 - **RFP 분석**: PDF/DOCX 형식의 RFP 문서를 업로드하면 AI가 핵심 요구사항, 평가 기준, 일정 등을 자동 분석
 - **제안서 생성**: 분석된 RFP 기반으로 AI가 맞춤형 제안서 초안 자동 생성
 - **수주 전략**: 경쟁사 대비 차별화 전략, 가격 전략, 기술 전략 등 수주 전략 수립
@@ -62,6 +63,11 @@ docker compose up -d
 | `POSTGRES_USER` | DB 사용자명 | `rfp` |
 | `POSTGRES_PASSWORD` | DB 비밀번호 | `rfp1234` |
 | `POSTGRES_DB` | DB 이름 | `rfpdb` |
+| `SESSION_SECRET` | 세션 쿠키 서명 키 | `rfp-dev-secret-change-me` |
+| `ADMIN_USERNAME` | 기본 관리자 아이디 | `admin` |
+| `ADMIN_PASSWORD` | 기본 관리자 비밀번호 | `admin1234` |
+
+> 첫 실행 시 위 환경변수 기반으로 관리자 계정이 자동 생성됩니다. 운영 환경에서는 반드시 `SESSION_SECRET`과 `ADMIN_PASSWORD`를 변경하세요.
 
 ## 프로젝트 구조
 
