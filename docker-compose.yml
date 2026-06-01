@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
 
   app:
-    image: 20.20.6.248:5000/ai-rfp:${IMAGE_TAG:-260518}
+    image: 20.20.6.248:5000/ai-rfp:${IMAGE_TAG:-260601}
     container_name: rfp-ai
     ports:
       - "9000:9000"
