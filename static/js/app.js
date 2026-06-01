@@ -159,6 +159,7 @@ function switchTab(tabId) {
     if (navBtn) navBtn.classList.add('active');
     document.querySelector('.topbar-title').textContent = navBtn?.querySelector('.nav-text')?.textContent || '';
     if (tabId === 'tab-dashboard') refreshDashboard();
+    if (tabId === 'tab-review' && typeof refreshDocumentList === 'function') refreshDocumentList();
     const tabMap = { 'tab-analyze': 'analyze', 'tab-pattern': 'pattern', 'tab-proposal': 'proposal', 'tab-review': 'review', 'tab-strategy': 'strategy', 'tab-estimate': 'estimate' };
     const cacheKey = tabMap[tabId];
     if (cacheKey && cachedResults[cacheKey]) showCachedResult(cacheKey);
@@ -1012,6 +1013,104 @@ function renderScore(data) {
     el('exportContent').innerHTML = h; el('exportModal').classList.add('show');
 }
 
+// ─── Document Upload (제안서 파일 업로드) ───
+async function uploadReviewDocument() {
+    const fileInput = el('reviewDocFile');
+    const f = fileInput.files[0];
+    if (!f) return;
+    const statusEl = el('reviewDocStatus');
+    statusEl.style.color = 'var(--text-muted)';
+    statusEl.textContent = `📤 ${f.name} 업로드 중...`;
+
+    const rfpId = el('reviewRfpSelect')?.value || currentRfpId;
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('doc_type', 'proposal');
+    if (rfpId) fd.append('rfp_id', rfpId);
+
+    try {
+        const r = await fetch('api/document/upload', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || '업로드 실패');
+
+        // Auto-fill review textarea + score buffer
+        el('proposalTextForReview').value = data.content_text || '';
+        lastProposalRaw = data.content_text || '';
+
+        statusEl.style.color = '#10b981';
+        statusEl.innerHTML = `✓ ${data.filename} (${data.text_length.toLocaleString()}자) 추출 완료. 아래 텍스트 영역에 자동 입력되었습니다.`;
+        fileInput.value = '';
+        showToast('문서 업로드 완료');
+        refreshDocumentList();
+    } catch (e) {
+        statusEl.style.color = '#ef4444';
+        statusEl.textContent = `✗ ${e.message}`;
+        showToast(e.message, 'error');
+    }
+}
+
+async function refreshDocumentList() {
+    const listEl = el('reviewDocList');
+    if (!listEl) return;
+    const rfpId = el('reviewRfpSelect')?.value || currentRfpId;
+    try {
+        const url = rfpId ? `api/document/list?rfp_id=${encodeURIComponent(rfpId)}` : 'api/document/list';
+        const r = await fetch(url, { credentials: 'same-origin' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || '조회 실패');
+        if (!data.documents?.length) {
+            listEl.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">업로드된 문서가 없습니다.</div>';
+            return;
+        }
+        listEl.innerHTML = `<table class="data-table" style="font-size:12px"><thead><tr><th>파일명</th><th>유형</th><th>글자수</th><th>업로드</th><th>작업</th></tr></thead><tbody>` +
+            data.documents.map(d => `<tr>
+                <td><strong>${d.filename}</strong></td>
+                <td><span class="badge badge-optional">${d.doc_type||'-'}</span></td>
+                <td>${(d.text_length||0).toLocaleString()}</td>
+                <td>${(d.uploaded_at||'').slice(0,16).replace('T',' ')}</td>
+                <td>
+                    <button class="btn btn-outline btn-sm" onclick="loadDocumentIntoReview('${d.id}')">불러오기</button>
+                    <button class="btn btn-outline btn-sm" onclick="deleteDocument('${d.id}')">삭제</button>
+                </td>
+            </tr>`).join('') + `</tbody></table>`;
+    } catch (e) {
+        listEl.innerHTML = `<div style="font-size:12px;color:#ef4444">${e.message}</div>`;
+    }
+}
+
+async function loadDocumentIntoReview(docId) {
+    try {
+        const r = await fetch(`api/document/${docId}`, { credentials: 'same-origin' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || '조회 실패');
+        const text = data.document?.content_text || '';
+        el('proposalTextForReview').value = text;
+        lastProposalRaw = text;
+        showToast(`${data.document?.filename||''} 불러왔습니다.`);
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+async function deleteDocument(docId) {
+    if (!confirm('이 문서를 삭제할까요?')) return;
+    try {
+        const r = await fetch(`api/document/${docId}`, { method: 'DELETE', credentials: 'same-origin' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || '삭제 실패');
+        showToast('삭제 완료');
+        refreshDocumentList();
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+function scoreUploadedProposal() {
+    const text = el('proposalTextForReview')?.value || '';
+    if (!text.trim()) { showToast('제안서 내용을 먼저 입력하거나 업로드해주세요.', 'warning'); return; }
+    scoreProposal(encodeURIComponent(text));
+}
+
 // ─── Review ───
 async function reviewProposal() {
     const rfpId = el('reviewRfpSelect')?.value || currentRfpId;
@@ -1613,6 +1712,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.nav-item[data-tab]').forEach(btn => { btn.addEventListener('click', () => switchTab(btn.dataset.tab)); });
     document.addEventListener('change', e => {
         if (e.target.classList.contains('rfp-select') && e.target.value) selectRfp(e.target.value);
+        if (e.target.id === 'reviewRfpSelect' && typeof refreshDocumentList === 'function') refreshDocumentList();
     });
 
     // Check authentication session

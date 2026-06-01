@@ -521,6 +521,35 @@ def extract_pdf_text(filepath: str) -> str:
     return clean_text(text)
 
 
+def extract_docx_text(filepath: str) -> str:
+    try:
+        from docx import Document as DocxDocument
+        doc = DocxDocument(filepath)
+        parts = [p.text for p in doc.paragraphs if p.text]
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
+                if row_text:
+                    parts.append(row_text)
+        return clean_text("\n".join(parts))
+    except Exception as e:
+        return f"[DOCX 파싱 오류: {e}]"
+
+
+def extract_document_text(filepath: str, filename: str) -> str:
+    name = filename.lower()
+    if name.endswith(".pdf"):
+        return extract_pdf_text(filepath)
+    if name.endswith(".docx"):
+        return extract_docx_text(filepath)
+    if name.endswith(".txt") or name.endswith(".md"):
+        try:
+            return clean_text(Path(filepath).read_text(encoding="utf-8", errors="ignore"))
+        except Exception as e:
+            return f"[텍스트 읽기 오류: {e}]"
+    return ""
+
+
 # ─── Routes ───
 
 @app.get("/", response_class=HTMLResponse)
@@ -621,6 +650,7 @@ async def dashboard(request: Request):
 # ─── Upload ───
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))  # 50MB
+ALLOWED_DOC_EXTS = {".pdf", ".docx", ".txt", ".md"}
 
 
 def _safe_filename(name: str) -> str:
@@ -652,6 +682,90 @@ async def upload_rfp(request: Request, file: UploadFile = File(...)):
     db.upsert_pipeline(rfp_id, {}, {})
     log_activity("RFP 업로드", f"{safe_name} ({len(text):,}자)")
     return {"rfp_id": rfp_id, "filename": safe_name, "text_length": len(text), "preview": text[:500]}
+
+
+# ─── Document Upload (제안서, 레퍼런스 등) ───
+
+@app.post("/api/document/upload")
+async def upload_document(
+    request: Request,
+    file: UploadFile = File(...),
+    rfp_id: str = Form(None),
+    doc_type: str = Form("proposal"),
+):
+    user = require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
+
+    safe_name = _safe_filename(file.filename or "")
+    ext = Path(safe_name).suffix.lower()
+    if ext not in ALLOWED_DOC_EXTS:
+        raise HTTPException(400, f"허용 확장자: {', '.join(sorted(ALLOWED_DOC_EXTS))}")
+
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"파일 크기가 너무 큽니다. (최대 {MAX_UPLOAD_BYTES//(1024*1024)}MB)")
+    # Magic bytes check for binary types
+    if ext == ".pdf" and not content.startswith(b"%PDF-"):
+        raise HTTPException(400, "유효한 PDF 파일이 아닙니다.")
+    if ext == ".docx" and not content[:4] == b"PK\x03\x04":
+        raise HTTPException(400, "유효한 DOCX 파일이 아닙니다.")
+
+    doc_id = str(uuid.uuid4())[:8]
+    filepath = UPLOAD_DIR / f"doc_{doc_id}_{safe_name}"
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    text = extract_document_text(str(filepath), safe_name)
+    db.insert_document(doc_id, rfp_id, user["id"], doc_type, safe_name, str(filepath), text, datetime.now().isoformat())
+    log_activity("문서 업로드", f"{safe_name} ({len(text):,}자)")
+    return {
+        "doc_id": doc_id,
+        "filename": safe_name,
+        "doc_type": doc_type,
+        "rfp_id": rfp_id,
+        "text_length": len(text),
+        "preview": text[:500],
+        "content_text": text,
+    }
+
+
+@app.get("/api/document/list")
+async def list_documents_api(request: Request, rfp_id: str = None):
+    user = require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
+        items = db.list_documents(rfp_id=rfp_id)
+    else:
+        owner_id = None if user.get("is_admin") else user["id"]
+        items = db.list_documents(owner_id=owner_id)
+    return JSONResponse({"documents": items})
+
+
+@app.get("/api/document/{doc_id}")
+async def get_document_api(request: Request, doc_id: str):
+    user = require_user(request)
+    doc = db.get_document(doc_id)
+    if not doc:
+        raise HTTPException(404, "문서를 찾을 수 없습니다.")
+    if not user.get("is_admin") and doc.get("owner_id") not in (None, user["id"]):
+        raise HTTPException(403, "해당 문서에 접근 권한이 없습니다.")
+    return JSONResponse({"document": doc})
+
+
+@app.delete("/api/document/{doc_id}")
+async def delete_document_api(request: Request, doc_id: str):
+    user = require_user(request)
+    doc = db.get_document(doc_id)
+    if not doc:
+        raise HTTPException(404, "문서를 찾을 수 없습니다.")
+    if not user.get("is_admin") and doc.get("owner_id") not in (None, user["id"]):
+        raise HTTPException(403, "해당 문서에 접근 권한이 없습니다.")
+    row = db.delete_document(doc_id)
+    if row and row[0] and Path(row[0]).exists():
+        Path(row[0]).unlink(missing_ok=True)
+    log_activity("문서 삭제", doc.get("filename", ""))
+    return JSONResponse({"ok": True})
 
 
 # ─── 1. RFP 자동 구조화 ───

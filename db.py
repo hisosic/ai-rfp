@@ -107,6 +107,20 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     detail TEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS documents (
+    id           TEXT PRIMARY KEY,
+    rfp_id       TEXT,
+    owner_id     INTEGER,
+    doc_type     TEXT NOT NULL DEFAULT 'proposal',
+    filename     TEXT NOT NULL,
+    filepath     TEXT NOT NULL,
+    content_text TEXT NOT NULL DEFAULT '',
+    text_length  INTEGER NOT NULL DEFAULT 0,
+    uploaded_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_documents_rfp ON documents(rfp_id);
+CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_id);
 CREATE INDEX IF NOT EXISTS idx_rfps_owner ON rfps(owner_id);
 CREATE INDEX IF NOT EXISTS idx_proposals_rfp ON proposals(rfp_id);
 CREATE INDEX IF NOT EXISTS idx_versions_rfp ON versions(rfp_id);
@@ -222,8 +236,48 @@ def delete_user(user_id: int):
         cur = conn.cursor()
         # Release owned RFPs so admin can still see them; leave content intact
         cur.execute("UPDATE rfps SET owner_id=NULL WHERE owner_id=%s", (user_id,))
+        cur.execute("UPDATE documents SET owner_id=NULL WHERE owner_id=%s", (user_id,))
         cur.execute("DELETE FROM users WHERE id=%s AND is_admin=FALSE", (user_id,))
         return cur.rowcount > 0
+
+
+# ─── Documents (uploaded files: proposals, references, etc.) ───
+
+def insert_document(doc_id, rfp_id, owner_id, doc_type, filename, filepath, content_text, uploaded_at):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""INSERT INTO documents (id,rfp_id,owner_id,doc_type,filename,filepath,content_text,text_length,uploaded_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (doc_id, rfp_id, owner_id, doc_type, filename, filepath, content_text, len(content_text), uploaded_at))
+
+
+def list_documents(rfp_id=None, owner_id=None):
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        clauses, params = [], []
+        if rfp_id is not None:
+            clauses.append("rfp_id=%s"); params.append(rfp_id)
+        if owner_id is not None:
+            clauses.append("owner_id=%s"); params.append(owner_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        cur.execute(f"SELECT id,rfp_id,owner_id,doc_type,filename,text_length,uploaded_at FROM documents{where} ORDER BY uploaded_at DESC", params)
+        return cur.fetchall()
+
+
+def get_document(doc_id):
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM documents WHERE id=%s", (doc_id,))
+        return cur.fetchone()
+
+
+def delete_document(doc_id):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT filepath, owner_id FROM documents WHERE id=%s", (doc_id,))
+        row = cur.fetchone()
+        cur.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
+        return row
 
 
 def migrate_from_json_if_needed():

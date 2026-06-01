@@ -38,5 +38,8 @@ services:
 
 volumes:
   rfp-pgdata:
+    name: rfp-pgdata
   rfp-uploads:
+    name: rfp-uploads
   rfp-data:
+    name: rfp-data

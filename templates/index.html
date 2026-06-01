@@ -14,7 +14,7 @@
     <title>RFP AI Analyzer - AI 제안 업무 자동화 플랫폼</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/style.css?v=260421d">
+    <link rel="stylesheet" href="static/css/style.css?v=260518e">
 </head>
 <body>
 
@@ -333,12 +333,26 @@
         <div id="tab-review" class="tab-content">
             <div class="card">
                 <div class="card-title">Review AI (Red Team)</div>
-                <p style="color:var(--text-muted);margin-bottom:16px">제안서를 비판적으로 검토하여 누락, 논리 불일치, 약점을 찾습니다.</p>
+                <p style="color:var(--text-muted);margin-bottom:16px">제안서를 비판적으로 검토하여 누락, 논리 불일치, 약점을 찾습니다. PDF/DOCX 업로드 또는 직접 입력 가능합니다.</p>
                 <div class="rfp-selector"><label>RFP (원문 대조):</label><select class="form-control rfp-select" id="reviewRfpSelect"></select></div>
+
+                <!-- Document Upload -->
+                <div class="form-group" style="border:2px dashed var(--border);border-radius:10px;padding:16px;background:rgba(99,102,241,0.04)">
+                    <label style="display:block;margin-bottom:8px"><strong>제안서 파일 업로드</strong> (PDF / DOCX / TXT / MD, 최대 50MB)</label>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                        <input type="file" id="reviewDocFile" accept=".pdf,.docx,.txt,.md" style="flex:1;min-width:240px"
+                               onchange="uploadReviewDocument()">
+                        <button class="btn btn-outline btn-sm" onclick="refreshDocumentList()">내 업로드 문서 보기</button>
+                    </div>
+                    <div id="reviewDocStatus" style="font-size:12px;color:var(--text-muted);margin-top:6px"></div>
+                    <div id="reviewDocList" style="margin-top:10px"></div>
+                </div>
+
                 <div class="form-group"><label>검토할 제안서 내용</label>
-                    <textarea class="form-control" id="proposalTextForReview" style="min-height:200px" placeholder="제안서 전문 또는 주요 섹션을 붙여넣으세요..."></textarea></div>
+                    <textarea class="form-control" id="proposalTextForReview" style="min-height:200px" placeholder="제안서 전문 또는 주요 섹션을 붙여넣으세요. 파일을 업로드하면 자동으로 채워집니다..."></textarea></div>
                 <div class="btn-group" style="margin-bottom:12px">
                     <button class="btn btn-warning" id="btnReview" onclick="reviewProposal()">Red Team 리뷰</button>
+                    <button class="btn btn-outline" onclick="scoreUploadedProposal()">AI 경쟁력 채점</button>
                 </div>
                 <div id="historyBar-review" class="history-bar"></div>
                 <div id="reviewSpinner" class="spinner"><div class="spinner-ring"></div><div class="spinner-text">레드팀 리뷰 중...</div></div>
@@ -516,6 +530,6 @@
     </div>
 </div>
 
-<script src="static/js/app.js?v=260421d"></script>
+<script src="static/js/app.js?v=260518e"></script>
 </body>
 </html>
