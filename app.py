@@ -649,7 +649,7 @@ async def dashboard(request: Request):
 
 # ─── Upload ───
 
-MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))  # 50MB
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))  # 100MB
 ALLOWED_DOC_EXTS = {".pdf", ".docx", ".txt", ".md"}
 
 
