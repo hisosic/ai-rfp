@@ -14,7 +14,7 @@
     <title>RFP AI Analyzer - AI 제안 업무 자동화 플랫폼</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/css/style.css?v=260601e">
+    <link rel="stylesheet" href="static/css/style.css?v=260601f">
 </head>
 <body>
 
@@ -149,7 +149,7 @@
     <div class="sidebar-footer">
         <div class="api-status">
             <span class="api-dot on" id="apiDot"></span>
-            <span>Claude Sonnet 4</span>
+            <span id="apiModelLabel">{{ model_label|default('Claude') }}</span>
         </div>
     </div>
 </nav>
@@ -530,6 +530,6 @@
     </div>
 </div>
 
-<script src="static/js/app.js?v=260601e"></script>
+<script src="static/js/app.js?v=260601f"></script>
 </body>
 </html>

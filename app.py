@@ -141,6 +141,21 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "16384"))
 
 
+def _model_display_name(model_id: str) -> str:
+    """Convert model ID to human-friendly label."""
+    m = (model_id or "").lower()
+    if "opus-4-8" in m: return "Claude Opus 4.8"
+    if "opus-4-7" in m: return "Claude Opus 4.7"
+    if "opus-4-6" in m: return "Claude Opus 4.6"
+    if "opus" in m: return "Claude Opus"
+    if "sonnet-4-6" in m: return "Claude Sonnet 4.6"
+    if "sonnet-4-20250514" in m: return "Claude Sonnet 4"
+    if "sonnet" in m: return "Claude Sonnet"
+    if "haiku-4-5" in m: return "Claude Haiku 4.5"
+    if "haiku" in m: return "Claude Haiku"
+    return model_id or "Claude"
+
+
 def call_ai(system_prompt: str, user_prompt: str, mock_type: str = "") -> str:
     client = get_anthropic_client()
     if client:
@@ -559,7 +574,7 @@ def extract_document_text(filepath: str, filename: str) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request, "model_label": _model_display_name(ANTHROPIC_MODEL)})
 
 
 # ─── Auth API ───
