@@ -1332,14 +1332,19 @@ async function refineProposalWithSelected() {
     }
 }
 
+function downloadRefinedDocx() { downloadDocx(encodeURIComponent(lastRefinedRaw)); }
+function downloadRefinedPptx() { downloadPptx(encodeURIComponent(lastRefinedRaw)); }
+function downloadRefinedPdf() { downloadPdf(encodeURIComponent(lastRefinedRaw)); }
+function exportRefinedMd() { exportProposal(encodeURIComponent(lastRefinedRaw)); }
+function scoreRefined() { scoreProposal(encodeURIComponent(lastRefinedRaw)); }
+
 function renderRefinedProposal(data, raw) {
-    const enc = encodeURIComponent(raw);
     let h = `<div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:14px">
-        <button class="btn btn-success" onclick="downloadDocx('${enc}')">DOCX 다운로드</button>
-        <button class="btn btn-primary" onclick="downloadPptx('${enc}')">PPT 다운로드</button>
-        <button class="btn btn-warning" onclick="downloadPdf('${enc}')">PDF 다운로드</button>
-        <button class="btn btn-outline" onclick="exportProposal('${enc}')">Markdown</button>
-        <button class="btn btn-outline" onclick="scoreProposal('${enc}')">AI 채점</button>
+        <button class="btn btn-success" onclick="downloadRefinedDocx()">DOCX 다운로드</button>
+        <button class="btn btn-primary" onclick="downloadRefinedPptx()">PPT 다운로드</button>
+        <button class="btn btn-warning" onclick="downloadRefinedPdf()">PDF 다운로드</button>
+        <button class="btn btn-outline" onclick="exportRefinedMd()">Markdown</button>
+        <button class="btn btn-outline" onclick="scoreRefined()">AI 채점</button>
     </div>`;
 
     if (data && data.title) {
