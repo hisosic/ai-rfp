@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 import time
+import unicodedata
 import pdfplumber
 from pathlib import Path
 from typing import Optional
@@ -654,8 +655,14 @@ ALLOWED_DOC_EXTS = {".pdf", ".docx", ".txt", ".md"}
 
 
 def _safe_filename(name: str) -> str:
-    name = Path(name).name  # strip any path components
-    name = re.sub(r"[^A-Za-z0-9._\-가-힣 ]", "_", name)
+    # Strip path components and null bytes
+    name = Path(name).name.replace("\x00", "")
+    # Normalize NFD (macOS default) to NFC so Korean composes correctly
+    name = unicodedata.normalize("NFC", name)
+    # Block only filesystem-unsafe characters; preserve all letters (Korean/CJK/etc.)
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name)
+    # Collapse whitespace
+    name = re.sub(r"\s+", " ", name).strip()
     return name[:200] or "upload.pdf"
 
 
