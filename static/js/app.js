@@ -712,8 +712,9 @@ function renderProposal(data, rawText) {
             let secIdx = 0;
             Object.entries(data.sections).forEach(([title, content]) => {
                 const color = sectionColors[secIdx % sectionColors.length];
-                // Split content into paragraphs
-                const paragraphs = content.split('\n').filter(p => p.trim());
+                // Coerce to string (some sections may be objects/arrays)
+                const text = typeof content === 'string' ? content : (content == null ? '' : JSON.stringify(content, null, 2));
+                const paragraphs = text.split('\n').filter(p => p.trim());
                 h += `<div style="margin-bottom:20px;border:1px solid var(--border);border-radius:14px;overflow:hidden">
                     <div style="background:${color}18;padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
                         <span style="width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0"></span>
@@ -1369,8 +1370,10 @@ function renderRefinedProposal(data, raw) {
             h += `<div style="background:var(--bg-card2);border:1px solid var(--border);border-radius:10px;padding:14px">
                 <div style="font-weight:700;margin-bottom:8px;font-size:13px">섹션 미리보기</div>`;
             Object.entries(data.sections).slice(0, 3).forEach(([k, v]) => {
+                const text = typeof v === 'string' ? v : (v == null ? '' : JSON.stringify(v, null, 2));
+                const truncated = text.length > 400 ? text.substring(0, 400) + '...' : text;
                 h += `<div style="margin-bottom:10px"><div style="font-size:13px;color:var(--primary-light);font-weight:600">${k}</div>
-                    <div style="font-size:12px;color:var(--text-dim);line-height:1.7;max-height:120px;overflow:hidden">${(v||'').substring(0,400)}${v?.length>400?'...':''}</div></div>`;
+                    <div style="font-size:12px;color:var(--text-dim);line-height:1.7;max-height:120px;overflow:hidden;white-space:pre-wrap">${truncated}</div></div>`;
             });
             const remain = Object.keys(data.sections).length - 3;
             if (remain > 0) h += `<div style="font-size:12px;color:var(--text-muted)">+ ${remain}개 섹션 (다운로드하여 확인)</div>`;

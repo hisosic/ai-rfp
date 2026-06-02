@@ -1358,7 +1358,13 @@ async def export_docx(request: Request, proposal_text: str = Form("")):
         for sec_title, sec_content in sections.items():
             h = doc.add_heading(sec_title, level=2)
             h.runs[0].font.color.rgb = RGBColor(30, 58, 138)
-            doc.add_paragraph(sec_content)
+            if isinstance(sec_content, str):
+                text = sec_content
+            elif sec_content is None:
+                text = ""
+            else:
+                text = json.dumps(sec_content, ensure_ascii=False, indent=2)
+            doc.add_paragraph(text)
             doc.add_paragraph()
     else:
         # Plain text fallback
@@ -2253,7 +2259,13 @@ async def export_pdf(request: Request, proposal_text: str = Form("")):
             pdf.ln(6)
             pdf.set_font(body_font, "", 11)
             pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(0, 7, sec_content)
+            if isinstance(sec_content, str):
+                _text = sec_content
+            elif sec_content is None:
+                _text = ""
+            else:
+                _text = json.dumps(sec_content, ensure_ascii=False, indent=2)
+            pdf.multi_cell(0, 7, _text)
     else:
         pdf.add_page()
         pdf.set_font(body_font, "", 11)
