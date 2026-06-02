@@ -24,6 +24,8 @@ services:
       - "9000:9000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-opus-4-8}
+      - ANTHROPIC_MAX_TOKENS=${ANTHROPIC_MAX_TOKENS:-16384}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-rfp}:${POSTGRES_PASSWORD:-rfp1234}@db:5432/${POSTGRES_DB:-rfpdb}
       - SESSION_SECRET=${SESSION_SECRET:-rfp-dev-secret-change-me}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}

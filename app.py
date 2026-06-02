@@ -137,13 +137,17 @@ def get_anthropic_client():
     return None
 
 
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "16384"))
+
+
 def call_ai(system_prompt: str, user_prompt: str, mock_type: str = "") -> str:
     client = get_anthropic_client()
     if client:
         try:
             message = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=8192,
+                model=ANTHROPIC_MODEL,
+                max_tokens=ANTHROPIC_MAX_TOKENS,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             )

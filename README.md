@@ -60,6 +60,8 @@ docker compose up -d
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
 | `ANTHROPIC_API_KEY` | Anthropic API 키 (필수) | - |
+| `ANTHROPIC_MODEL` | 사용할 Claude 모델 | `claude-opus-4-8` |
+| `ANTHROPIC_MAX_TOKENS` | 응답 최대 토큰 | `16384` |
 | `POSTGRES_USER` | DB 사용자명 | `rfp` |
 | `POSTGRES_PASSWORD` | DB 비밀번호 | `rfp1234` |
 | `POSTGRES_DB` | DB 이름 | `rfpdb` |
