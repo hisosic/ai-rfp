@@ -1106,6 +1106,66 @@ RFP 원문과 제안서 본문을 대조하여 **실제 평가표 채점 수준�
     return JSONResponse({"review": result})
 
 
+# ─── 4-1. 보완 제안서 생성 (Red Team 개선사항 반영) ───
+
+@app.post("/api/refine-proposal")
+async def refine_proposal(
+    request: Request,
+    rfp_id: str = Form(None),
+    original_proposal: str = Form(...),
+    improvements_json: str = Form(...),
+):
+    require_user(request)
+    if rfp_id:
+        check_rfp_access(request, rfp_id)
+
+    rfp_text = ""
+    if rfp_id and db.rfp_exists(rfp_id):
+        meta = db.get_rfp_meta(rfp_id)
+        rfp_text = extract_pdf_text(meta["filepath"])[:4000] if meta and Path(meta["filepath"]).exists() else ""
+
+    system = """당신은 제안서 개선 전문 컨설턴트입니다.
+원본 제안서에 사용자가 선택한 개선사항을 모두 정확히 반영하여 **보완된 제안서 v2**를 작성하세요.
+
+## 원칙
+1. **원본의 모든 섹션과 구조를 유지**하면서 선택된 개선사항을 반영
+2. 누락된 요구사항 → 해당 섹션을 신설하거나 보강
+3. Wording 개선 사항 → before를 after로 치환
+4. 우선순위 P0 항목은 반드시 반영, P1/P2도 선택된 경우 반영
+5. 한국어 비즈니스 공식 문체 유지, 정량 수치 보강
+6. 원본 제안서의 JSON 스키마(title/executive_summary/win_themes/discriminators/evaluation_mapping/table_of_contents/sections/references_summary/key_personnel/risk_register)를 동일하게 출력
+
+## 출력 형식
+원본 제안서와 동일한 JSON 스키마를 그대로 사용하되 보완 내용 반영. 마크다운 코드블록 없이 순수 JSON만 출력.
+추가로 최상위에 "refinement_log" 배열을 포함하여 어떤 개선사항을 어떻게 반영했는지 명시:
+{
+  "title": "...",
+  "executive_summary": "...",
+  ...(원본과 동일 스키마)...,
+  "refinement_log": [
+    {"applied": "반영한 개선사항(요약)", "section": "반영된 섹션", "change": "어떤 변경을 가했는지"}
+  ]
+}"""
+
+    user_msg = f"""## 원본 제안서
+{original_proposal[:12000]}
+
+## 사용자가 선택/편집한 개선사항 (JSON)
+{improvements_json[:6000]}"""
+    if rfp_text:
+        user_msg += f"\n\n## RFP 원문 (참고)\n{rfp_text}"
+
+    result = call_ai(system, user_msg, mock_type="proposal")
+    proposal_id = str(uuid.uuid4())[:8]
+    db.insert_proposal(proposal_id, rfp_id, result)
+    if rfp_id:
+        db.update_pipeline_step(rfp_id, "proposal", result)
+    record_history(rfp_id, "proposal", result)
+    log_activity("보완 제안서 생성", f"Refined Proposal #{proposal_id}")
+    await ws_manager.notify("보완 제안서 생성", f"Proposal v2 #{proposal_id}")
+    return JSONResponse({"proposal_id": proposal_id, "proposal": result})
+
+
 # ─── 5. Go/No-Go ───
 
 @app.post("/api/strategy")

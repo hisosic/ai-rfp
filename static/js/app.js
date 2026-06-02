@@ -1202,23 +1202,60 @@ function renderReview(data) {
         });
     }
 
-    // Improvement suggestions
+    // Improvement suggestions — editable + selectable
     if (data.improvement_suggestions?.length) {
-        h += `<div class="section-title">우선순위 개선 제안</div>`;
-        data.improvement_suggestions.forEach(s => {
-            if (typeof s === 'string') { h += `<div class="factor-item" style="border-left-color:var(--primary)">${s}</div>`; return; }
+        h += `<div class="section-title">우선순위 개선 제안 <span style="font-size:11px;font-weight:400;color:var(--text-muted)">— 체크하고 내용 수정 가능</span></div>`;
+        data.improvement_suggestions.forEach((s, i) => {
+            if (typeof s === 'string') s = { suggestion: s, priority: '', effort: '', impact: '' };
             const pb = s.priority==='P0'?'badge-high':s.priority==='P1'?'badge-medium':'badge-low';
-            h += `<div class="factor-item" style="border-left-color:var(--primary)"><span class="badge ${pb}">${s.priority||''}</span> <span style="color:var(--text-muted);font-size:12px">(${s.effort||''})</span><br><strong>${s.suggestion||''}</strong>${s.impact?`<br><span style="font-size:12px;color:#10b981">예상 효과: ${s.impact}</span>`:''}</div>`;
+            const checked = s.priority === 'P0' ? 'checked' : '';
+            h += `<div class="factor-item refine-item" style="border-left-color:var(--primary);display:flex;gap:10px;align-items:flex-start"
+                    data-kind="suggestion" data-index="${i}">
+                <input type="checkbox" class="refine-check" ${checked} style="margin-top:4px;width:18px;height:18px;flex-shrink:0">
+                <div style="flex:1">
+                    <div style="margin-bottom:4px"><span class="badge ${pb}">${s.priority||''}</span> <span style="color:var(--text-muted);font-size:12px">(${s.effort||''})</span></div>
+                    <textarea class="form-control refine-text" style="min-height:48px;font-size:13px;margin-bottom:4px">${(s.suggestion||'').replace(/</g,'&lt;')}</textarea>
+                    ${s.impact?`<div style="font-size:12px;color:#10b981">예상 효과: ${s.impact}</div>`:''}
+                </div>
+            </div>`;
         });
     }
 
-    // Wording improvements
+    // Wording improvements — editable + selectable
     if (data.wording_improvements?.length) {
-        h += `<div class="section-title">문장 개선 예시</div><table class="data-table"><thead><tr><th>현재</th><th>개선안</th><th>이유</th></tr></thead><tbody>`;
-        data.wording_improvements.forEach(w => {
-            h += `<tr><td style="color:#fca5a5">${w.before||''}</td><td style="color:#86efac">${w.after||''}</td><td style="font-size:12px;color:var(--text-muted)">${w.why||''}</td></tr>`;
+        h += `<div class="section-title">문장 개선 예시 <span style="font-size:11px;font-weight:400;color:var(--text-muted)">— 체크하고 개선안 수정 가능</span></div>`;
+        data.wording_improvements.forEach((w, i) => {
+            h += `<div class="factor-item refine-item" style="border-left-color:#06b6d4;display:flex;gap:10px;align-items:flex-start"
+                    data-kind="wording" data-index="${i}" data-before="${(w.before||'').replace(/"/g,'&quot;')}">
+                <input type="checkbox" class="refine-check" checked style="margin-top:4px;width:18px;height:18px;flex-shrink:0">
+                <div style="flex:1">
+                    <div style="font-size:12px;color:#fca5a5;margin-bottom:4px">현재: ${w.before||''}</div>
+                    <textarea class="form-control refine-text" style="min-height:48px;font-size:13px;color:#86efac;margin-bottom:4px">${(w.after||'').replace(/</g,'&lt;')}</textarea>
+                    ${w.why?`<div style="font-size:12px;color:var(--text-muted)">이유: ${w.why}</div>`:''}
+                </div>
+            </div>`;
         });
-        h += `</tbody></table>`;
+    }
+
+    // Missing requirements — selectable for refinement
+    if (data.missing_requirements?.length) {
+        // already rendered above as info, but include them in refinement collection via separate hidden block
+        h += `<input type="hidden" id="missingReqJson" value='${JSON.stringify(data.missing_requirements).replace(/'/g,'&#39;')}'>`;
+    }
+
+    // Refine button
+    if (data.improvement_suggestions?.length || data.wording_improvements?.length) {
+        h += `<div style="margin-top:20px;padding:18px;background:linear-gradient(135deg,rgba(99,102,241,0.12),rgba(16,185,129,0.08));border:1px solid var(--primary);border-radius:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+                <div>
+                    <div style="font-weight:700;color:var(--primary-light);font-size:15px">✨ 보완 제안서 자동 생성</div>
+                    <div style="font-size:12px;color:var(--text-muted);margin-top:4px">위에서 체크/수정한 개선사항을 반영하여 새 버전의 제안서를 생성합니다.</div>
+                </div>
+                <button class="btn btn-primary" id="btnRefineProposal" onclick="refineProposalWithSelected()">선택한 개선사항 반영 →</button>
+            </div>
+            <div id="refineSpinner" class="spinner" style="margin-top:12px"><div class="spinner-ring"></div><div class="spinner-text">보완 제안서 생성 중...</div></div>
+            <div id="refinedProposalResult" style="margin-top:14px"></div>
+        </div>`;
     }
 
     // Competitor gaps
@@ -1231,6 +1268,119 @@ function renderReview(data) {
     }
 
     e.innerHTML = h;
+}
+
+// ─── Refine Proposal (보완 제안서) ───
+let lastRefinedRaw = '';
+
+async function refineProposalWithSelected() {
+    const original = el('proposalTextForReview')?.value?.trim();
+    if (!original) { showToast('원본 제안서 내용을 찾을 수 없습니다. 제안서를 먼저 입력/업로드하세요.', 'warning'); return; }
+
+    // Collect selected improvements
+    const suggestions = [], wording_improvements = [];
+    document.querySelectorAll('.refine-item').forEach(it => {
+        const checked = it.querySelector('.refine-check')?.checked;
+        if (!checked) return;
+        const text = it.querySelector('.refine-text')?.value?.trim();
+        if (!text) return;
+        const kind = it.dataset.kind;
+        if (kind === 'suggestion') suggestions.push({ suggestion: text });
+        else if (kind === 'wording') wording_improvements.push({ before: it.dataset.before || '', after: text });
+    });
+
+    // Include missing requirements as auto-applied
+    let missing = [];
+    const missingEl = el('missingReqJson');
+    if (missingEl) {
+        try { missing = JSON.parse(missingEl.value); } catch {}
+    }
+
+    if (!suggestions.length && !wording_improvements.length && !missing.length) {
+        showToast('반영할 개선사항을 1개 이상 선택하세요.', 'warning');
+        return;
+    }
+
+    const improvements = { suggestions, wording_improvements, missing_requirements: missing };
+    const rfpId = el('reviewRfpSelect')?.value || currentRfpId;
+
+    const btn = el('btnRefineProposal');
+    btn.disabled = true; btn.textContent = '생성 중...';
+    showLoading('refineSpinner');
+    el('refinedProposalResult').innerHTML = '';
+
+    const fd = new FormData();
+    if (rfpId) fd.append('rfp_id', rfpId);
+    fd.append('original_proposal', original);
+    fd.append('improvements_json', JSON.stringify(improvements));
+
+    try {
+        const r = await fetch('api/refine-proposal', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || '생성 실패');
+        lastRefinedRaw = data.proposal || '';
+        const parsed = parseJsonSafe(lastRefinedRaw);
+        renderRefinedProposal(parsed, lastRefinedRaw);
+        showToast('보완 제안서 생성 완료!');
+    } catch (e) {
+        el('refinedProposalResult').innerHTML = `<div style="color:#ef4444">${e.message}</div>`;
+        showToast(e.message, 'error');
+    } finally {
+        hideLoading('refineSpinner');
+        btn.disabled = false; btn.textContent = '선택한 개선사항 반영 →';
+    }
+}
+
+function renderRefinedProposal(data, raw) {
+    const enc = encodeURIComponent(raw);
+    let h = `<div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:14px">
+        <button class="btn btn-success" onclick="downloadDocx('${enc}')">DOCX 다운로드</button>
+        <button class="btn btn-primary" onclick="downloadPptx('${enc}')">PPT 다운로드</button>
+        <button class="btn btn-warning" onclick="downloadPdf('${enc}')">PDF 다운로드</button>
+        <button class="btn btn-outline" onclick="exportProposal('${enc}')">Markdown</button>
+        <button class="btn btn-outline" onclick="scoreProposal('${enc}')">AI 채점</button>
+    </div>`;
+
+    if (data && data.title) {
+        h += `<div style="text-align:center;padding:20px;background:linear-gradient(135deg,rgba(16,185,129,0.12),rgba(99,102,241,0.08));border-radius:12px;margin-bottom:16px">
+            <div style="font-size:11px;color:#10b981;font-weight:700;letter-spacing:1px;margin-bottom:4px">REFINED v2</div>
+            <h3 style="color:var(--primary-light);font-size:18px;margin:0">${data.title}</h3>
+        </div>`;
+
+        // Refinement log — show what changed
+        if (data.refinement_log?.length) {
+            h += `<div class="card" style="margin-bottom:14px;border-left:4px solid #10b981">
+                <div style="font-weight:700;color:#10b981;margin-bottom:8px">📝 적용된 개선사항 (${data.refinement_log.length}건)</div>`;
+            data.refinement_log.forEach(r => {
+                h += `<div style="margin-bottom:8px;padding:8px;background:rgba(16,185,129,0.06);border-radius:6px;font-size:13px">
+                    <div><strong>${r.applied||''}</strong> ${r.section?`<span style="color:var(--text-muted);font-size:12px">→ ${r.section}</span>`:''}</div>
+                    ${r.change?`<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${r.change}</div>`:''}
+                </div>`;
+            });
+            h += `</div>`;
+        }
+
+        // Show key sections briefly
+        if (data.executive_summary) {
+            h += `<div class="card" style="margin-bottom:12px"><strong style="color:var(--accent)">Executive Summary</strong>
+                <p style="color:var(--text-dim);font-size:13px;line-height:1.7;margin-top:6px">${data.executive_summary}</p></div>`;
+        }
+        if (data.sections) {
+            h += `<div style="background:var(--bg-card2);border:1px solid var(--border);border-radius:10px;padding:14px">
+                <div style="font-weight:700;margin-bottom:8px;font-size:13px">섹션 미리보기</div>`;
+            Object.entries(data.sections).slice(0, 3).forEach(([k, v]) => {
+                h += `<div style="margin-bottom:10px"><div style="font-size:13px;color:var(--primary-light);font-weight:600">${k}</div>
+                    <div style="font-size:12px;color:var(--text-dim);line-height:1.7;max-height:120px;overflow:hidden">${(v||'').substring(0,400)}${v?.length>400?'...':''}</div></div>`;
+            });
+            const remain = Object.keys(data.sections).length - 3;
+            if (remain > 0) h += `<div style="font-size:12px;color:var(--text-muted)">+ ${remain}개 섹션 (다운로드하여 확인)</div>`;
+            h += `</div>`;
+        }
+    } else {
+        h += `<pre style="max-height:300px;overflow:auto;font-size:12px;background:var(--bg-card2);padding:12px;border-radius:8px">${(raw||'').substring(0,2000)}</pre>`;
+    }
+
+    el('refinedProposalResult').innerHTML = h;
 }
 
 // ─── Strategy ───
